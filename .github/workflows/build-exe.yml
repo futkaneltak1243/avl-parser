@@ -1,0 +1,28 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install customtkinter scipy numpy pyinstaller
+
+      - name: Build EXE
+        run: pyinstaller --noconfirm --windowed --onefile --name "AVL Parser" --add-data "parse_avl.py;." --hidden-import customtkinter app.py
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: AVL-Parser-Windows
+          path: dist/AVL Parser.exe
