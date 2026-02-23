@@ -76,9 +76,25 @@ def parse_filename(filename):
 
 
 def parse_file(filepath):
-    """Parse an AVL output file and return dict of {label: float_value}."""
+    """Parse an AVL output file and return (mach, alpha, coefficients).
+
+    Reads Mach and Alpha from inside the file content (not the filename).
+    Returns:
+        (mach, alpha, result) where result is a dict of {label: float_value}.
+    Raises ValueError if Mach or Alpha cannot be found in the file.
+    """
     with open(filepath, 'r') as f:
         text = f.read()
+
+    # Extract Mach and Alpha from file content
+    alpha_match = re.search(r'Alpha\s*=\s*([-\d.]+)', text)
+    mach_match = re.search(r'Mach\s*=\s*([\d.]+)', text)
+
+    if not alpha_match or not mach_match:
+        raise ValueError(f"Cannot find Mach/Alpha in {os.path.basename(filepath)}")
+
+    mach = float(mach_match.group(1))
+    alpha = float(alpha_match.group(1))
 
     result = {}
 
@@ -101,7 +117,7 @@ def parse_file(filepath):
             print(f"  WARNING: {label} not found in {os.path.basename(filepath)}")
             result[label] = None
 
-    return result
+    return mach, alpha, result
 
 
 def mach_to_varname(mach):
@@ -114,6 +130,8 @@ def mach_to_varname(mach):
 def process_files(filepaths):
     """Parse a list of AVL file paths and return a dict ready for savemat().
 
+    Reads Mach and Alpha values from inside each file (not from filenames).
+
     Returns:
         (mat_data, stats) where stats is a dict with 'parsed', 'skipped',
         'machs', 'alphas' info.
@@ -121,24 +139,22 @@ def process_files(filepaths):
     mach_alphas = {}
     file_list = []
     skipped = []
+    data = {}
 
     for filepath in filepaths:
         filename = os.path.basename(filepath)
         try:
-            mach, alpha = parse_filename(filename)
+            mach, alpha, coefficients = parse_file(filepath)
         except ValueError:
             skipped.append(filename)
             continue
         mach_alphas.setdefault(mach, set()).add(alpha)
         file_list.append((mach, alpha, filepath))
+        data[(mach, alpha)] = coefficients
 
     machs = sorted(mach_alphas.keys())
     for mach in machs:
         mach_alphas[mach] = sorted(mach_alphas[mach])
-
-    data = {}
-    for mach, alpha, filepath in file_list:
-        data[(mach, alpha)] = parse_file(filepath)
 
     all_alphas = sorted(set(a for alphas in mach_alphas.values() for a in alphas))
 

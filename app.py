@@ -15,7 +15,7 @@ import customtkinter as ctk
 
 # Ensure imports work when running from any directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from parse_avl import parse_filename, process_files, ALL_LABELS
+from parse_avl import process_files, ALL_LABELS
 
 from scipy.io import savemat
 
@@ -152,19 +152,13 @@ class AVLParserApp(ctk.CTk):
             if path in self.filepaths:
                 skipped += 1
                 continue
-            filename = os.path.basename(path)
-            try:
-                parse_filename(filename)
-            except ValueError:
-                skipped += 1
-                continue
             self.filepaths.append(path)
-            self.file_listbox.insert("end", filename)
+            self.file_listbox.insert("end", os.path.basename(path))
             added += 1
 
         self._update_count()
         if skipped > 0:
-            self._set_status(f"Added {added} files, skipped {skipped} invalid")
+            self._set_status(f"Added {added} files, skipped {skipped} duplicates")
         else:
             self._set_status(f"Added {added} files")
 
