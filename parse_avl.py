@@ -65,6 +65,24 @@ SPECIAL_PATTERNS = {
 ALL_LABELS = STANDARD_LABELS + list(SPECIAL_PATTERNS.keys())
 
 
+# --- Exceptions ---
+
+class FileReadError(Exception):
+    """Raised when a file cannot be read at all."""
+    def __init__(self, filename, reason):
+        self.filename = filename
+        self.reason = reason
+        super().__init__(f"{filename}: {reason}")
+
+
+class AVLFormatError(Exception):
+    """Raised when a file is readable but not valid AVL output."""
+    def __init__(self, filename, reason):
+        self.filename = filename
+        self.reason = reason
+        super().__init__(f"{filename}: {reason}")
+
+
 # --- Parsing ---
 
 def parse_filename(filename):
@@ -76,27 +94,47 @@ def parse_filename(filename):
 
 
 def parse_file(filepath):
-    """Parse an AVL output file and return (mach, alpha, coefficients).
+    """Parse an AVL output file and return (mach, alpha, coefficients, warnings).
 
     Reads Mach and Alpha from inside the file content (not the filename).
     Returns:
-        (mach, alpha, result) where result is a dict of {label: float_value}.
-    Raises ValueError if Mach or Alpha cannot be found in the file.
+        (mach, alpha, result, warnings) where result is a dict of
+        {label: float_value} and warnings is a list of missing-label strings.
+    Raises:
+        FileReadError: if the file cannot be read (permissions, binary, etc.)
+        AVLFormatError: if the file is not a valid AVL output file.
     """
-    with open(filepath, 'r') as f:
-        text = f.read()
+    filename = os.path.basename(filepath)
+
+    # Try to read the file — catch all I/O and encoding problems
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='strict') as f:
+            text = f.read()
+    except PermissionError:
+        raise FileReadError(filename, "permission denied")
+    except UnicodeDecodeError:
+        raise FileReadError(filename, "not a text file (binary?)")
+    except OSError as e:
+        raise FileReadError(filename, str(e))
+
+    # Check for AVL header signature
+    if 'Vortex Lattice Output' not in text:
+        raise AVLFormatError(filename, "not an AVL output file")
 
     # Extract Mach and Alpha from file content
     alpha_match = re.search(r'Alpha\s*=\s*([-\d.]+)', text)
     mach_match = re.search(r'Mach\s*=\s*([\d.]+)', text)
 
-    if not alpha_match or not mach_match:
-        raise ValueError(f"Cannot find Mach/Alpha in {os.path.basename(filepath)}")
+    if not alpha_match:
+        raise AVLFormatError(filename, "Alpha value not found")
+    if not mach_match:
+        raise AVLFormatError(filename, "Mach value not found")
 
     mach = float(mach_match.group(1))
     alpha = float(alpha_match.group(1))
 
     result = {}
+    warnings = []
 
     # Standard labels: use lookbehind to prevent partial matches
     for label in STANDARD_LABELS:
@@ -105,7 +143,7 @@ def parse_file(filepath):
         if m:
             result[label] = float(m.group(1))
         else:
-            print(f"  WARNING: {label} not found in {os.path.basename(filepath)}")
+            warnings.append(label)
             result[label] = None
 
     # Special labels with custom patterns
@@ -114,10 +152,10 @@ def parse_file(filepath):
         if m:
             result[label] = float(m.group(1))
         else:
-            print(f"  WARNING: {label} not found in {os.path.basename(filepath)}")
+            warnings.append(label)
             result[label] = None
 
-    return mach, alpha, result
+    return mach, alpha, result, warnings
 
 
 def mach_to_varname(mach):
@@ -127,30 +165,96 @@ def mach_to_varname(mach):
 
 # --- Processing ---
 
+def validate_file(filepath):
+    """Quick-validate a single file without full coefficient parsing.
+
+    Returns (True, info_string) if valid, (False, error_string) if not.
+    The info string shows Mach and Alpha found inside.
+    """
+    filename = os.path.basename(filepath)
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='strict') as f:
+            text = f.read()
+    except PermissionError:
+        return False, "permission denied"
+    except UnicodeDecodeError:
+        return False, "not a text file (binary?)"
+    except OSError as e:
+        return False, str(e)
+
+    if 'Vortex Lattice Output' not in text:
+        return False, "not an AVL output file"
+
+    alpha_match = re.search(r'Alpha\s*=\s*([-\d.]+)', text)
+    mach_match = re.search(r'Mach\s*=\s*([\d.]+)', text)
+
+    if not alpha_match:
+        return False, "Alpha value not found"
+    if not mach_match:
+        return False, "Mach value not found"
+
+    mach = float(mach_match.group(1))
+    alpha = float(alpha_match.group(1))
+    return True, f"Mach={mach}, Alpha={alpha}"
+
+
 def process_files(filepaths):
     """Parse a list of AVL file paths and return a dict ready for savemat().
 
     Reads Mach and Alpha values from inside each file (not from filenames).
 
     Returns:
-        (mat_data, stats) where stats is a dict with 'parsed', 'skipped',
-        'machs', 'alphas' info.
+        (mat_data, stats) where stats is a dict with:
+            'parsed'     - number of successfully parsed files
+            'skipped'    - list of (filename, reason) tuples
+            'duplicates' - list of (filename, mach, alpha, replaced_filename) tuples
+            'warnings'   - dict of {filename: [missing_labels]}
+            'machs'      - sorted list of Mach values
+            'alphas'     - sorted list of Alpha values
+    Raises:
+        ValueError if no valid AVL files were found.
     """
     mach_alphas = {}
     file_list = []
-    skipped = []
+    skipped = []       # [(filename, reason)]
+    duplicates = []    # [(filename, mach, alpha, replaced_filename)]
+    file_warnings = {} # {filename: [missing_labels]}
     data = {}
+    key_to_file = {}   # {(mach, alpha): filename} — track which file owns each slot
 
     for filepath in filepaths:
         filename = os.path.basename(filepath)
         try:
-            mach, alpha, coefficients = parse_file(filepath)
-        except ValueError:
-            skipped.append(filename)
+            mach, alpha, coefficients, warnings = parse_file(filepath)
+        except (FileReadError, AVLFormatError) as e:
+            skipped.append((e.filename, e.reason))
             continue
+        except Exception as e:
+            skipped.append((filename, str(e)))
+            continue
+
+        # Track missing labels per file
+        if warnings:
+            file_warnings[filename] = warnings
+
+        # Check for duplicate Mach/Alpha
+        key = (mach, alpha)
+        if key in data:
+            old_file = key_to_file[key]
+            duplicates.append((filename, mach, alpha, old_file))
+
         mach_alphas.setdefault(mach, set()).add(alpha)
         file_list.append((mach, alpha, filepath))
-        data[(mach, alpha)] = coefficients
+        data[key] = coefficients
+        key_to_file[key] = filename
+
+    # Fail if nothing was parsed
+    if not file_list:
+        if skipped:
+            reasons = "\n".join(f"  {name}: {reason}" for name, reason in skipped)
+            raise ValueError(f"No valid AVL files found.\n\n{reasons}")
+        else:
+            raise ValueError("No files to process.")
 
     machs = sorted(mach_alphas.keys())
     for mach in machs:
@@ -175,6 +279,8 @@ def process_files(filepaths):
     stats = {
         'parsed': len(file_list),
         'skipped': skipped,
+        'duplicates': duplicates,
+        'warnings': file_warnings,
         'machs': machs,
         'alphas': all_alphas,
     }

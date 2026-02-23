@@ -15,7 +15,7 @@ import customtkinter as ctk
 
 # Ensure imports work when running from any directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from parse_avl import process_files, ALL_LABELS
+from parse_avl import process_files, validate_file, ALL_LABELS
 
 from scipy.io import savemat
 
@@ -147,20 +147,53 @@ class AVLParserApp(ctk.CTk):
             return
 
         added = 0
-        skipped = 0
+        duplicates = 0
+        rejected = []  # [(filename, reason)]
+
         for path in paths:
+            filename = os.path.basename(path)
+
+            # Skip duplicates
             if path in self.filepaths:
-                skipped += 1
+                duplicates += 1
                 continue
+
+            # Validate before adding
+            valid, info = validate_file(path)
+            if not valid:
+                rejected.append((filename, info))
+                continue
+
             self.filepaths.append(path)
-            self.file_listbox.insert("end", os.path.basename(path))
+            self.file_listbox.insert("end", filename)
             added += 1
 
         self._update_count()
-        if skipped > 0:
-            self._set_status(f"Added {added} files, skipped {skipped} duplicates")
+
+        # Build status message
+        parts = []
+        if added > 0:
+            parts.append(f"Added {added} file{'s' if added != 1 else ''}")
+        if duplicates > 0:
+            parts.append(f"{duplicates} duplicate{'s' if duplicates != 1 else ''} skipped")
+
+        if rejected:
+            parts.append(f"{len(rejected)} rejected")
+            self._set_status(" | ".join(parts))
+
+            # Show detailed rejection popup
+            detail_lines = [f"  {name}:\n    {reason}\n" for name, reason in rejected]
+            detail = "\n".join(detail_lines)
+            messagebox.showwarning(
+                "Some files were rejected",
+                f"{len(rejected)} file{'s' if len(rejected) != 1 else ''} "
+                f"could not be added:\n\n{detail}"
+                f"Only valid AVL output files are accepted."
+            )
+        elif parts:
+            self._set_status(" | ".join(parts))
         else:
-            self._set_status(f"Added {added} files")
+            self._set_status("No new files added")
 
     def clear_files(self):
         self.filepaths.clear()
@@ -198,22 +231,53 @@ class AVLParserApp(ctk.CTk):
         try:
             mat_data, stats = process_files(self.filepaths)
             savemat(save_path, mat_data)
-
-            n_a = len(stats['alphas'])
-            n_m = len(stats['machs'])
-            msg = (f"Parsed {stats['parsed']} files\n"
-                   f"{n_m} Mach numbers, {n_a} alpha values\n"
-                   f"{len(ALL_LABELS)} coefficients\n\n"
-                   f"Saved to:\n{save_path}")
-            if stats['skipped']:
-                msg += f"\n\nSkipped: {', '.join(stats['skipped'])}"
-
-            self._set_status(f"Exported {stats['parsed']} files to {os.path.basename(save_path)}")
-            messagebox.showinfo("Export complete", msg)
-
+        except ValueError as e:
+            # All files were invalid — process_files raises ValueError
+            self._set_status("Export failed — no valid files")
+            messagebox.showerror("Export failed", str(e))
+            return
         except Exception as e:
             self._set_status(f"Error: {e}")
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Unexpected error", str(e))
+            return
+
+        # --- Build the success report ---
+        n_a = len(stats['alphas'])
+        n_m = len(stats['machs'])
+
+        msg = (f"Parsed {stats['parsed']} files\n"
+               f"{n_m} Mach number{'s' if n_m != 1 else ''}, "
+               f"{n_a} Alpha value{'s' if n_a != 1 else ''}\n"
+               f"{len(ALL_LABELS)} coefficients\n\n"
+               f"Saved to:\n{save_path}")
+
+        # Report skipped files with reasons
+        if stats['skipped']:
+            msg += f"\n\n--- Skipped ({len(stats['skipped'])}) ---"
+            for name, reason in stats['skipped']:
+                msg += f"\n  {name}: {reason}"
+
+        # Report duplicate Mach/Alpha (last file wins)
+        if stats['duplicates']:
+            msg += f"\n\n--- Duplicates ({len(stats['duplicates'])}) ---"
+            for name, mach, alpha, replaced in stats['duplicates']:
+                msg += (f"\n  {name} has same Mach={mach}, Alpha={alpha}"
+                        f"\n    (overwrote {replaced})")
+
+        # Report files with missing coefficients
+        if stats['warnings']:
+            msg += f"\n\n--- Missing coefficients ---"
+            for name, labels in stats['warnings'].items():
+                msg += f"\n  {name}: {', '.join(labels)}"
+
+        self._set_status(f"Exported {stats['parsed']} files to {os.path.basename(save_path)}")
+
+        # Use warning icon if there were any issues, info icon if clean
+        has_issues = stats['skipped'] or stats['duplicates'] or stats['warnings']
+        if has_issues:
+            messagebox.showwarning("Export complete (with warnings)", msg)
+        else:
+            messagebox.showinfo("Export complete", msg)
 
     # --- Helpers ---
 
