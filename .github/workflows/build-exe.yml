@@ -7,22 +7,32 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
+          architecture: 'x64'
 
       - name: Install dependencies
         run: pip install customtkinter scipy numpy pyinstaller
 
       - name: Build EXE
-        run: pyinstaller --noconfirm --windowed --onefile --name "AVL Parser" --add-data "parse_avl.py;." --hidden-import customtkinter app.py
+        run: pyinstaller --noconfirm --windowed --onefile --name "AVLParser" --add-data "parse_avl.py;." --hidden-import customtkinter app.py
+
+      - name: Create release zip
+        run: Compress-Archive -Path "dist/AVLParser.exe" -DestinationPath "dist/AVLParser-Windows-x64.zip"
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
-          name: AVL-Parser-Windows
-          path: dist/AVL Parser.exe
+          name: AVLParser-Windows-x64
+          path: dist/AVLParser.exe
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: AVLParser-Windows-x64-zip
+          path: dist/AVLParser-Windows-x64.zip
