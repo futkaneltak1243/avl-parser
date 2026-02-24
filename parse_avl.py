@@ -64,6 +64,16 @@ SPECIAL_PATTERNS = {
 
 ALL_LABELS = STANDARD_LABELS + list(SPECIAL_PATTERNS.keys())
 
+# Variables that can be paired with Mach (rows of the output matrix)
+PAIRABLE_VARS = {
+    'Alpha': r'Alpha\s*=\s*([-\d.]+)',
+    'Beta':  r'Beta\s*=\s*([-\d.]+)',
+    'FLAP':  r'FLAP\s*=\s*([-\d.]+)',
+    'AIL':   r'AIL\s*=\s*([-\d.]+)',
+    'ELEV':  r'ELEV\s*=\s*([-\d.]+)',
+    'RUDD':  r'RUDD\s*=\s*([-\d.]+)',
+}
+
 
 # --- Exceptions ---
 
@@ -94,12 +104,15 @@ def parse_filename(filename):
 
 
 def parse_file(filepath):
-    """Parse an AVL output file and return (mach, alpha, coefficients, warnings).
+    """Parse an AVL output file and return (mach, run_vars, coefficients, warnings).
 
-    Reads Mach and Alpha from inside the file content (not the filename).
+    Reads Mach and all pairable variables from the file content.
     Returns:
-        (mach, alpha, result, warnings) where result is a dict of
-        {label: float_value} and warnings is a list of missing-label strings.
+        (mach, run_vars, result, warnings) where:
+            - mach is a float (always required)
+            - run_vars is a dict of {var_name: float_or_None} for all PAIRABLE_VARS
+            - result is a dict of {label: float_value} for all coefficients
+            - warnings is a list of missing coefficient label strings
     Raises:
         FileReadError: if the file cannot be read (permissions, binary, etc.)
         AVLFormatError: if the file is not a valid AVL output file.
@@ -121,17 +134,17 @@ def parse_file(filepath):
     if 'Vortex Lattice Output' not in text:
         raise AVLFormatError(filename, "not an AVL output file")
 
-    # Extract Mach and Alpha from file content
-    alpha_match = re.search(r'Alpha\s*=\s*([-\d.]+)', text)
+    # Extract Mach (always required)
     mach_match = re.search(r'Mach\s*=\s*([\d.]+)', text)
-
-    if not alpha_match:
-        raise AVLFormatError(filename, "Alpha value not found")
     if not mach_match:
         raise AVLFormatError(filename, "Mach value not found")
-
     mach = float(mach_match.group(1))
-    alpha = float(alpha_match.group(1))
+
+    # Extract all pairable variables (None if not found)
+    run_vars = {}
+    for var_name, pattern in PAIRABLE_VARS.items():
+        m = re.search(pattern, text)
+        run_vars[var_name] = float(m.group(1)) if m else None
 
     result = {}
     warnings = []
@@ -155,7 +168,7 @@ def parse_file(filepath):
             warnings.append(label)
             result[label] = None
 
-    return mach, alpha, result, warnings
+    return mach, run_vars, result, warnings
 
 
 def mach_to_varname(mach):
@@ -169,7 +182,7 @@ def validate_file(filepath):
     """Quick-validate a single file without full coefficient parsing.
 
     Returns (True, info_string) if valid, (False, error_string) if not.
-    The info string shows Mach and Alpha found inside.
+    Only Mach is required. The info string shows all detected run variables.
     """
     filename = os.path.basename(filepath)
     try:
@@ -185,47 +198,57 @@ def validate_file(filepath):
     if 'Vortex Lattice Output' not in text:
         return False, "not an AVL output file"
 
-    alpha_match = re.search(r'Alpha\s*=\s*([-\d.]+)', text)
     mach_match = re.search(r'Mach\s*=\s*([\d.]+)', text)
-
-    if not alpha_match:
-        return False, "Alpha value not found"
     if not mach_match:
         return False, "Mach value not found"
 
-    mach = float(mach_match.group(1))
-    alpha = float(alpha_match.group(1))
-    return True, f"Mach={mach}, Alpha={alpha}"
+    # Build info string with all detected pairable variables
+    parts = [f"Mach={float(mach_match.group(1))}"]
+    for var_name, pattern in PAIRABLE_VARS.items():
+        m = re.search(pattern, text)
+        if m:
+            parts.append(f"{var_name}={float(m.group(1))}")
+    return True, ", ".join(parts)
 
 
-def process_files(filepaths):
+def process_files(filepaths, second_var='Alpha'):
     """Parse a list of AVL file paths and return a dict ready for savemat().
 
-    Reads Mach and Alpha values from inside each file (not from filenames).
+    Reads Mach and the selected second variable from inside each file.
+
+    Args:
+        filepaths: list of file paths to parse.
+        second_var: which variable to pair with Mach ('Alpha', 'Beta',
+                    'FLAP', 'AIL', 'ELEV', or 'RUDD'). Default: 'Alpha'.
 
     Returns:
         (mat_data, stats) where stats is a dict with:
             'parsed'     - number of successfully parsed files
             'skipped'    - list of (filename, reason) tuples
-            'duplicates' - list of (filename, mach, alpha, replaced_filename) tuples
+            'duplicates' - list of (filename, mach, var_val, replaced_filename) tuples
             'warnings'   - dict of {filename: [missing_labels]}
             'machs'      - sorted list of Mach values
-            'alphas'     - sorted list of Alpha values
+            'second_var' - name of the second variable
+            'var_values' - sorted list of second variable values
     Raises:
         ValueError if no valid AVL files were found.
     """
-    mach_alphas = {}
+    if second_var not in PAIRABLE_VARS:
+        raise ValueError(f"Unknown variable: {second_var}. "
+                         f"Choose from: {', '.join(PAIRABLE_VARS.keys())}")
+
+    mach_vars = {}     # {mach: set of second_var values}
     file_list = []
     skipped = []       # [(filename, reason)]
-    duplicates = []    # [(filename, mach, alpha, replaced_filename)]
+    duplicates = []    # [(filename, mach, var_val, replaced_filename)]
     file_warnings = {} # {filename: [missing_labels]}
     data = {}
-    key_to_file = {}   # {(mach, alpha): filename} — track which file owns each slot
+    key_to_file = {}   # {(mach, var_val): filename}
 
     for filepath in filepaths:
         filename = os.path.basename(filepath)
         try:
-            mach, alpha, coefficients, warnings = parse_file(filepath)
+            mach, run_vars, coefficients, warnings = parse_file(filepath)
         except (FileReadError, AVLFormatError) as e:
             skipped.append((e.filename, e.reason))
             continue
@@ -233,18 +256,24 @@ def process_files(filepaths):
             skipped.append((filename, str(e)))
             continue
 
+        # Check that the selected second variable exists in this file
+        var_val = run_vars.get(second_var)
+        if var_val is None:
+            skipped.append((filename, f"{second_var} value not found"))
+            continue
+
         # Track missing labels per file
         if warnings:
             file_warnings[filename] = warnings
 
-        # Check for duplicate Mach/Alpha
-        key = (mach, alpha)
+        # Check for duplicate Mach/var pairs
+        key = (mach, var_val)
         if key in data:
             old_file = key_to_file[key]
-            duplicates.append((filename, mach, alpha, old_file))
+            duplicates.append((filename, mach, var_val, old_file))
 
-        mach_alphas.setdefault(mach, set()).add(alpha)
-        file_list.append((mach, alpha, filepath))
+        mach_vars.setdefault(mach, set()).add(var_val)
+        file_list.append((mach, var_val, filepath))
         data[key] = coefficients
         key_to_file[key] = filename
 
@@ -256,22 +285,22 @@ def process_files(filepaths):
         else:
             raise ValueError("No files to process.")
 
-    machs = sorted(mach_alphas.keys())
+    machs = sorted(mach_vars.keys())
     for mach in machs:
-        mach_alphas[mach] = sorted(mach_alphas[mach])
+        mach_vars[mach] = sorted(mach_vars[mach])
 
-    all_alphas = sorted(set(a for alphas in mach_alphas.values() for a in alphas))
+    all_var_values = sorted(set(v for vals in mach_vars.values() for v in vals))
 
     mat_data = {
         'Mach_values': np.array(machs),
-        'Alpha_values': np.array(all_alphas, dtype=float),
+        f'{second_var}_values': np.array(all_var_values, dtype=float),
     }
 
     for label in ALL_LABELS:
-        matrix = np.full((len(all_alphas), len(machs)), float('nan'))
+        matrix = np.full((len(all_var_values), len(machs)), float('nan'))
         for j, mach in enumerate(machs):
-            for i, alpha in enumerate(all_alphas):
-                entry = data.get((mach, alpha))
+            for i, var_val in enumerate(all_var_values):
+                entry = data.get((mach, var_val))
                 if entry and entry.get(label) is not None:
                     matrix[i, j] = entry[label]
         mat_data[label] = matrix
@@ -282,7 +311,8 @@ def process_files(filepaths):
         'duplicates': duplicates,
         'warnings': file_warnings,
         'machs': machs,
-        'alphas': all_alphas,
+        'second_var': second_var,
+        'var_values': all_var_values,
     }
 
     return mat_data, stats
@@ -299,8 +329,9 @@ def main():
         if os.path.isfile(os.path.join(INPUT_DIR, f))
     ]
 
-    mat_data, stats = process_files(filepaths)
+    mat_data, stats = process_files(filepaths, second_var='Alpha')
 
+    sv = stats['second_var']
     print(f"Found {len(stats['machs'])} Mach numbers: {stats['machs']}")
     print(f"Parsed {stats['parsed']} files")
     if stats['skipped']:
@@ -309,17 +340,17 @@ def main():
     output_path = os.path.join(OUTPUT_DIR, 'avl_data.mat')
     savemat(output_path, mat_data)
 
-    n_a = len(stats['alphas'])
+    n_v = len(stats['var_values'])
     n_m = len(stats['machs'])
     print(f"\nOutput: {output_path}")
-    print(f"  Mach_values:  {stats['machs']}")
-    print(f"  Alpha_values: {stats['alphas']}")
-    print(f"  {len(ALL_LABELS)} coefficient matrices, each {n_a} x {n_m} (Alpha x Mach)")
+    print(f"  Mach_values:    {stats['machs']}")
+    print(f"  {sv}_values:  {stats['var_values']}")
+    print(f"  {len(ALL_LABELS)} coefficient matrices, each {n_v} x {n_m} ({sv} x Mach)")
     print(f"\nMATLAB usage:")
     print(f"  load('output/avl_data.mat')")
-    print(f"  CLtot          % {n_a}x{n_m} matrix (rows=Alpha, cols=Mach)")
-    print(f"  Alpha_values   % {n_a}x1 vector")
-    print(f"  Mach_values    % 1x{n_m} vector")
+    print(f"  CLtot            % {n_v}x{n_m} matrix (rows={sv}, cols=Mach)")
+    print(f"  {sv}_values   % {n_v}x1 vector")
+    print(f"  Mach_values      % 1x{n_m} vector")
 
 
 if __name__ == '__main__':

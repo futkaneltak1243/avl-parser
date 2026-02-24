@@ -15,7 +15,7 @@ import customtkinter as ctk
 
 # Ensure imports work when running from any directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from parse_avl import process_files, validate_file, ALL_LABELS
+from parse_avl import process_files, validate_file, ALL_LABELS, PAIRABLE_VARS
 
 from scipy.io import savemat
 
@@ -114,7 +114,26 @@ class AVLParserApp(ctk.CTk):
                                           border_color=("gray60", "gray40"),
                                           text_color=("gray30", "gray80"),
                                           hover_color=("gray85", "gray25"))
-        self.remove_btn.pack(pady=(0, 15))
+        self.remove_btn.pack(pady=(0, 12))
+
+        # --- Variable pairing selector ---
+        pair_frame = ctk.CTkFrame(container, fg_color="transparent")
+        pair_frame.pack(fill="x", pady=(0, 12))
+
+        pair_label = ctk.CTkLabel(pair_frame, text="Pair with Mach:",
+                                   font=ctk.CTkFont(size=13),
+                                   text_color=("gray30", "gray80"))
+        pair_label.pack(side="left", padx=(0, 10))
+
+        self.second_var = ctk.StringVar(value="Alpha")
+        self.pair_menu = ctk.CTkOptionMenu(
+            pair_frame,
+            variable=self.second_var,
+            values=list(PAIRABLE_VARS.keys()),
+            width=140, height=32,
+            font=ctk.CTkFont(size=13),
+        )
+        self.pair_menu.pack(side="left")
 
         # --- Export button ---
         self.export_btn = ctk.CTkButton(container, text="Export .mat",
@@ -228,11 +247,12 @@ class AVLParserApp(ctk.CTk):
         self._set_status("Processing...")
         self.update()
 
+        sv = self.second_var.get()
+
         try:
-            mat_data, stats = process_files(self.filepaths)
+            mat_data, stats = process_files(self.filepaths, second_var=sv)
             savemat(save_path, mat_data)
         except ValueError as e:
-            # All files were invalid — process_files raises ValueError
             self._set_status("Export failed — no valid files")
             messagebox.showerror("Export failed", str(e))
             return
@@ -242,12 +262,13 @@ class AVLParserApp(ctk.CTk):
             return
 
         # --- Build the success report ---
-        n_a = len(stats['alphas'])
+        n_v = len(stats['var_values'])
         n_m = len(stats['machs'])
 
-        msg = (f"Parsed {stats['parsed']} files\n"
+        msg = (f"Paired: Mach x {sv}\n"
+               f"Parsed {stats['parsed']} files\n"
                f"{n_m} Mach number{'s' if n_m != 1 else ''}, "
-               f"{n_a} Alpha value{'s' if n_a != 1 else ''}\n"
+               f"{n_v} {sv} value{'s' if n_v != 1 else ''}\n"
                f"{len(ALL_LABELS)} coefficients\n\n"
                f"Saved to:\n{save_path}")
 
@@ -257,11 +278,11 @@ class AVLParserApp(ctk.CTk):
             for name, reason in stats['skipped']:
                 msg += f"\n  {name}: {reason}"
 
-        # Report duplicate Mach/Alpha (last file wins)
+        # Report duplicate Mach/var pairs (last file wins)
         if stats['duplicates']:
             msg += f"\n\n--- Duplicates ({len(stats['duplicates'])}) ---"
-            for name, mach, alpha, replaced in stats['duplicates']:
-                msg += (f"\n  {name} has same Mach={mach}, Alpha={alpha}"
+            for name, mach, var_val, replaced in stats['duplicates']:
+                msg += (f"\n  {name} has same Mach={mach}, {sv}={var_val}"
                         f"\n    (overwrote {replaced})")
 
         # Report files with missing coefficients
@@ -270,7 +291,7 @@ class AVLParserApp(ctk.CTk):
             for name, labels in stats['warnings'].items():
                 msg += f"\n  {name}: {', '.join(labels)}"
 
-        self._set_status(f"Exported {stats['parsed']} files to {os.path.basename(save_path)}")
+        self._set_status(f"Exported {stats['parsed']} files ({sv} x Mach)")
 
         # Use warning icon if there were any issues, info icon if clean
         has_issues = stats['skipped'] or stats['duplicates'] or stats['warnings']
