@@ -6,3 +6,9 @@ dist/
 output/
 *.mat
 .DS_Store
+test files/
+test_edge_cases/
+.claude/
+*.zip
+view_mat.py
+setup_windows.bat
