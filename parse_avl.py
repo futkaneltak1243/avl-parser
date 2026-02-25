@@ -291,12 +291,20 @@ def process_files(filepaths, second_var='Alpha'):
 
     all_var_values = sorted(set(v for vals in mach_vars.values() for v in vals))
 
+    # Filter labels: control surfaces only get their own derivatives
+    SURFACE_SUFFIX = {'FLAP': 'd01', 'AIL': 'd02', 'ELEV': 'd03', 'RUDD': 'd04'}
+    if second_var in SURFACE_SUFFIX:
+        suffix = SURFACE_SUFFIX[second_var]
+        export_labels = [l for l in ALL_LABELS if suffix in l]
+    else:
+        export_labels = ALL_LABELS
+
     mat_data = {
         'Mach_values': np.array(machs),
         f'{second_var}_values': np.array(all_var_values, dtype=float),
     }
 
-    for label in ALL_LABELS:
+    for label in export_labels:
         matrix = np.full((len(all_var_values), len(machs)), float('nan'))
         for j, mach in enumerate(machs):
             for i, var_val in enumerate(all_var_values):
@@ -313,6 +321,7 @@ def process_files(filepaths, second_var='Alpha'):
         'machs': machs,
         'second_var': second_var,
         'var_values': all_var_values,
+        'n_labels': len(export_labels),
     }
 
     return mat_data, stats

@@ -30,8 +30,8 @@ class AVLParserApp(ctk.CTk):
         super().__init__()
 
         self.title("AVL Parser")
-        self.geometry("600x550")
-        self.minsize(500, 450)
+        self.geometry("600x620")
+        self.minsize(500, 550)
 
         self.filepaths = []
 
@@ -58,11 +58,11 @@ class AVLParserApp(ctk.CTk):
 
         # --- Separator ---
         sep = ctk.CTkFrame(container, height=2, fg_color=("gray80", "gray30"))
-        sep.pack(fill="x", pady=(12, 15))
+        sep.pack(fill="x", pady=(8, 10))
 
         # --- Buttons row ---
         btn_frame = ctk.CTkFrame(container, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(0, 10))
+        btn_frame.pack(fill="x", pady=(0, 6))
 
         self.add_btn = ctk.CTkButton(btn_frame, text="Add Files", command=self.add_files,
                                       width=140, height=36, font=ctk.CTkFont(size=13))
@@ -80,11 +80,11 @@ class AVLParserApp(ctk.CTk):
                                          font=ctk.CTkFont(size=12),
                                          text_color=("gray50", "gray60"),
                                          anchor="w")
-        self.count_label.pack(fill="x", pady=(0, 5))
+        self.count_label.pack(fill="x", pady=(0, 3))
 
         # --- File list ---
         list_frame = ctk.CTkFrame(container, corner_radius=8)
-        list_frame.pack(fill="both", expand=True, pady=(0, 10))
+        list_frame.pack(fill="both", expand=True, pady=(0, 6))
 
         self.file_listbox = tk.Listbox(
             list_frame,
@@ -114,34 +114,35 @@ class AVLParserApp(ctk.CTk):
                                           border_color=("gray60", "gray40"),
                                           text_color=("gray30", "gray80"),
                                           hover_color=("gray85", "gray25"))
-        self.remove_btn.pack(pady=(0, 12))
+        self.remove_btn.pack(pady=(0, 10))
 
-        # --- Variable pairing selector ---
-        pair_frame = ctk.CTkFrame(container, fg_color="transparent")
-        pair_frame.pack(fill="x", pady=(0, 12))
+        # --- Variable pairing (subtle label + small dropdown) ---
+        pair_row = ctk.CTkFrame(container, fg_color="transparent")
+        pair_row.pack(fill="x", pady=(0, 4))
 
-        pair_label = ctk.CTkLabel(pair_frame, text="Pair with Mach:",
-                                   font=ctk.CTkFont(size=13),
-                                   text_color=("gray30", "gray80"))
-        pair_label.pack(side="left", padx=(0, 10))
+        pair_label = ctk.CTkLabel(pair_row, text="Mach  ×",
+                                   font=ctk.CTkFont(size=12),
+                                   text_color=("gray50", "gray60"))
+        pair_label.pack(side="left", padx=(0, 6))
 
         self.second_var = ctk.StringVar(value="Alpha")
         self.pair_menu = ctk.CTkOptionMenu(
-            pair_frame,
+            pair_row,
             variable=self.second_var,
             values=list(PAIRABLE_VARS.keys()),
-            width=140, height=32,
-            font=ctk.CTkFont(size=13),
+            width=90, height=26,
+            font=ctk.CTkFont(size=12),
+            dynamic_resizing=False,
         )
         self.pair_menu.pack(side="left")
 
         # --- Export button ---
         self.export_btn = ctk.CTkButton(container, text="Export .mat",
                                           command=self.export_mat,
-                                          height=45, font=ctk.CTkFont(size=15, weight="bold"),
+                                          height=42, font=ctk.CTkFont(size=15, weight="bold"),
                                           fg_color=("#2d8a4e", "#2d8a4e"),
                                           hover_color=("#247a42", "#247a42"))
-        self.export_btn.pack(fill="x", pady=(0, 15))
+        self.export_btn.pack(fill="x", pady=(0, 10))
 
         # --- Status bar ---
         status_frame = ctk.CTkFrame(container, height=30, corner_radius=6,
@@ -269,7 +270,7 @@ class AVLParserApp(ctk.CTk):
                f"Parsed {stats['parsed']} files\n"
                f"{n_m} Mach number{'s' if n_m != 1 else ''}, "
                f"{n_v} {sv} value{'s' if n_v != 1 else ''}\n"
-               f"{len(ALL_LABELS)} coefficients\n\n"
+               f"{stats['n_labels']} coefficients\n\n"
                f"Saved to:\n{save_path}")
 
         # Report skipped files with reasons
@@ -293,14 +294,31 @@ class AVLParserApp(ctk.CTk):
 
         self._set_status(f"Exported {stats['parsed']} files ({sv} x Mach)")
 
-        # Use warning icon if there were any issues, info icon if clean
         has_issues = stats['skipped'] or stats['duplicates'] or stats['warnings']
-        if has_issues:
-            messagebox.showwarning("Export complete (with warnings)", msg)
-        else:
-            messagebox.showinfo("Export complete", msg)
+        title = "Export complete (with warnings)" if has_issues else "Export complete"
+        self._show_report(title, msg)
 
     # --- Helpers ---
+
+    def _show_report(self, title, message):
+        """Show a scrollable report dialog."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(title)
+        dialog.geometry("500x400")
+        dialog.resizable(True, True)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        textbox = ctk.CTkTextbox(dialog, font=("Courier", 13), wrap="word")
+        textbox.pack(fill="both", expand=True, padx=12, pady=(12, 8))
+        textbox.insert("1.0", message)
+        textbox.configure(state="disabled")
+
+        close_btn = ctk.CTkButton(dialog, text="OK", width=100, height=32,
+                                   command=dialog.destroy)
+        close_btn.pack(pady=(0, 12))
+
+        dialog.after(100, dialog.focus_force)
 
     def _update_count(self):
         n = len(self.filepaths)
