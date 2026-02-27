@@ -74,6 +74,15 @@ PAIRABLE_VARS = {
     'RUDD':  r'RUDD\s*=\s*([-\d.]+)',
 }
 
+# Control surface name -> derivative suffix mapping
+SURFACE_SUFFIX = {'FLAP': 'd01', 'AIL': 'd02', 'ELEV': 'd03', 'RUDD': 'd04'}
+SUFFIX_TO_SURFACE = {v: k for k, v in SURFACE_SUFFIX.items()}
+
+# All control surface derivative labels, grouped by surface
+SURFACE_COEFF_GROUPS = {}
+for _surface, _suffix in SURFACE_SUFFIX.items():
+    SURFACE_COEFF_GROUPS[_surface] = [l for l in STANDARD_LABELS if _suffix in l]
+
 
 # --- Exceptions ---
 
@@ -292,7 +301,6 @@ def process_files(filepaths, second_var='Alpha'):
     all_var_values = sorted(set(v for vals in mach_vars.values() for v in vals))
 
     # Filter labels: control surfaces only get their own derivatives
-    SURFACE_SUFFIX = {'FLAP': 'd01', 'AIL': 'd02', 'ELEV': 'd03', 'RUDD': 'd04'}
     if second_var in SURFACE_SUFFIX:
         suffix = SURFACE_SUFFIX[second_var]
         export_labels = [l for l in ALL_LABELS if suffix in l]
@@ -322,6 +330,254 @@ def process_files(filepaths, second_var='Alpha'):
         'second_var': second_var,
         'var_values': all_var_values,
         'n_labels': len(export_labels),
+    }
+
+    return mat_data, stats
+
+
+def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
+                     checked_coeffs=None):
+    """Parse AVL files and return 3D/2D matrices for control surface derivatives.
+
+    Each coefficient can be one of three modes:
+      '3d'         — 3D array (angle × Mach × surface_value)
+      '2d_angle'   — 2D array (angle × Mach)
+      '2d_surface' — 2D array (surface_value × Mach)
+
+    Args:
+        filepaths: list of file paths to parse.
+        angle_var: 'Alpha' or 'Beta' — the angle axis.
+        coeff_modes: dict {label: mode} where mode is '3d', '2d_angle',
+            or '2d_surface'. Labels not in dict default to '2d_angle'.
+        checked_coeffs: deprecated — set of labels for 3D treatment.
+            Converted to coeff_modes internally if coeff_modes is None.
+
+    Returns:
+        (mat_data, stats) where mat_data is ready for scipy.io.savemat().
+    Raises:
+        ValueError if no valid data is found.
+    """
+    if angle_var not in ('Alpha', 'Beta'):
+        raise ValueError(f"angle_var must be 'Alpha' or 'Beta', got '{angle_var}'")
+
+    # Backward compat: convert checked_coeffs to coeff_modes
+    if coeff_modes is None and checked_coeffs is not None:
+        coeff_modes = {l: '3d' for l in checked_coeffs}
+    if coeff_modes is None:
+        coeff_modes = {}
+
+    # All 32 control surface labels
+    all_surface_labels = []
+    for surface in SURFACE_SUFFIX:
+        all_surface_labels.extend(SURFACE_COEFF_GROUPS[surface])
+
+    skipped = []
+    duplicates_3d = []
+    duplicates_2d_angle = []
+    duplicates_2d_surface = []
+    file_warnings = {}
+
+    # Data storage: keyed by surface
+    data_3d = {s: {} for s in SURFACE_SUFFIX}           # (mach, angle, surface_val)
+    data_2d_angle = {s: {} for s in SURFACE_SUFFIX}      # (mach, angle)
+    data_2d_surface = {s: {} for s in SURFACE_SUFFIX}    # (mach, surface_val)
+    # Track which file produced each key for duplicate reporting
+    key_to_file_3d = {s: {} for s in SURFACE_SUFFIX}
+    key_to_file_2d_angle = {s: {} for s in SURFACE_SUFFIX}
+    key_to_file_2d_surface = {s: {} for s in SURFACE_SUFFIX}
+
+    mach_set = set()
+    angle_set = set()
+    surface_value_sets = {s: set() for s in SURFACE_SUFFIX}
+
+    parsed_count = 0
+
+    for filepath in filepaths:
+        filename = os.path.basename(filepath)
+        try:
+            mach, run_vars, coefficients, warnings = parse_file(filepath)
+        except (FileReadError, AVLFormatError) as e:
+            skipped.append((e.filename, e.reason))
+            continue
+        except Exception as e:
+            skipped.append((filename, str(e)))
+            continue
+
+        # Need at least one surface value
+        has_surface = any(run_vars.get(s) is not None for s in SURFACE_SUFFIX)
+        if not has_surface:
+            skipped.append((filename, "no control surface values found"))
+            continue
+
+        if warnings:
+            file_warnings[filename] = warnings
+
+        angle_val = run_vars.get(angle_var)
+        mach_set.add(mach)
+        if angle_val is not None:
+            angle_set.add(angle_val)
+
+        parsed_count += 1
+
+        for surface_name in SURFACE_SUFFIX:
+            surface_val = run_vars.get(surface_name)
+            if surface_val is None:
+                continue
+
+            surface_value_sets[surface_name].add(surface_val)
+
+            # Split labels into three groups by mode
+            surface_labels = SURFACE_COEFF_GROUPS[surface_name]
+            labels_3d = [l for l in surface_labels if coeff_modes.get(l) == '3d']
+            labels_2d_angle = [l for l in surface_labels
+                               if coeff_modes.get(l, '2d_angle') == '2d_angle']
+            labels_2d_surface = [l for l in surface_labels
+                                 if coeff_modes.get(l) == '2d_surface']
+
+            # 3D data: needs angle_val
+            if angle_val is not None and labels_3d:
+                key_3d = (mach, angle_val, surface_val)
+                if key_3d in data_3d[surface_name]:
+                    old_file = key_to_file_3d[surface_name][key_3d]
+                    duplicates_3d.append((
+                        filename, surface_name,
+                        f"Mach={mach}, {angle_var}={angle_val}, {surface_name}={surface_val}",
+                        old_file
+                    ))
+                data_3d[surface_name][key_3d] = coefficients
+                key_to_file_3d[surface_name][key_3d] = filename
+
+            # 2D-angle data: keyed by (mach, angle_val)
+            if labels_2d_angle and angle_val is not None:
+                key_2d = (mach, angle_val)
+                if key_2d in data_2d_angle[surface_name]:
+                    old_file = key_to_file_2d_angle[surface_name][key_2d]
+                    if old_file != filename:
+                        duplicates_2d_angle.append((
+                            filename, surface_name,
+                            f"Mach={mach}, {angle_var}={angle_val}",
+                            old_file
+                        ))
+                data_2d_angle[surface_name][key_2d] = coefficients
+                key_to_file_2d_angle[surface_name][key_2d] = filename
+
+            # 2D-surface data: keyed by (mach, surface_val)
+            if labels_2d_surface:
+                key_2d_s = (mach, surface_val)
+                if key_2d_s in data_2d_surface[surface_name]:
+                    old_file = key_to_file_2d_surface[surface_name][key_2d_s]
+                    if old_file != filename:
+                        duplicates_2d_surface.append((
+                            filename, surface_name,
+                            f"Mach={mach}, {surface_name}={surface_val}",
+                            old_file
+                        ))
+                data_2d_surface[surface_name][key_2d_s] = coefficients
+                key_to_file_2d_surface[surface_name][key_2d_s] = filename
+
+    if parsed_count == 0:
+        if skipped:
+            reasons = "\n".join(f"  {name}: {reason}" for name, reason in skipped)
+            raise ValueError(f"No valid AVL files found.\n\n{reasons}")
+        else:
+            raise ValueError("No files to process.")
+
+    machs = sorted(mach_set)
+    angle_vals = sorted(angle_set)
+
+    # Build mat_data
+    mat_data = {
+        'Mach_values': np.array(machs),
+    }
+
+    if angle_vals:
+        mat_data[f'{angle_var}_values'] = np.array(angle_vals, dtype=float)
+
+    surface_values_sorted = {}
+    for surface_name in SURFACE_SUFFIX:
+        vals = sorted(surface_value_sets[surface_name])
+        if vals:
+            surface_values_sorted[surface_name] = vals
+            mat_data[f'{surface_name}_values'] = np.array(vals, dtype=float)
+
+    n_3d = 0
+    n_2d_angle = 0
+    n_2d_surface = 0
+    labels_2d_surface_list = []
+
+    for surface_name in SURFACE_SUFFIX:
+        surf_vals = surface_values_sorted.get(surface_name, [])
+        if not surf_vals:
+            continue
+
+        for label in SURFACE_COEFF_GROUPS[surface_name]:
+            mode = coeff_modes.get(label, '2d_angle')
+
+            if mode == '3d':
+                # 3D matrix: (n_angle, n_mach, n_surface_val)
+                if not angle_vals:
+                    continue
+                matrix = np.full((len(angle_vals), len(machs), len(surf_vals)), np.nan)
+                for i, angle in enumerate(angle_vals):
+                    for j, mach in enumerate(machs):
+                        for k, sval in enumerate(surf_vals):
+                            entry = data_3d[surface_name].get((mach, angle, sval))
+                            if entry and entry.get(label) is not None:
+                                matrix[i, j, k] = entry[label]
+                mat_data[label] = matrix
+                n_3d += 1
+
+            elif mode == '2d_surface':
+                # 2D matrix: (n_surface_val, n_mach)
+                matrix = np.full((len(surf_vals), len(machs)), np.nan)
+                for k, sval in enumerate(surf_vals):
+                    for j, mach in enumerate(machs):
+                        entry = data_2d_surface[surface_name].get((mach, sval))
+                        if entry and entry.get(label) is not None:
+                            matrix[k, j] = entry[label]
+                mat_data[label] = matrix
+                n_2d_surface += 1
+                labels_2d_surface_list.append(label)
+
+            else:
+                # 2D matrix: (n_angle, n_mach)
+                if not angle_vals:
+                    continue
+                matrix = np.full((len(angle_vals), len(machs)), np.nan)
+                for i, angle in enumerate(angle_vals):
+                    for j, mach in enumerate(machs):
+                        entry = data_2d_angle[surface_name].get((mach, angle))
+                        if entry and entry.get(label) is not None:
+                            matrix[i, j] = entry[label]
+                mat_data[label] = matrix
+                n_2d_angle += 1
+
+    # Store metadata for view_mat.py to distinguish 2D types
+    if labels_2d_surface_list:
+        mat_data['x_2d_surface_labels'] = np.array(labels_2d_surface_list, dtype=object)
+
+    all_duplicates = []
+    for name, surface, desc, old in duplicates_3d:
+        all_duplicates.append((name, f"3D {surface}: {desc} (overwrote {old})"))
+    for name, surface, desc, old in duplicates_2d_angle:
+        all_duplicates.append((name, f"2D-angle {surface}: {desc} (overwrote {old})"))
+    for name, surface, desc, old in duplicates_2d_surface:
+        all_duplicates.append((name, f"2D-surface {surface}: {desc} (overwrote {old})"))
+
+    stats = {
+        'parsed': parsed_count,
+        'skipped': skipped,
+        'duplicates': all_duplicates,
+        'warnings': file_warnings,
+        'machs': machs,
+        'angle_var': angle_var,
+        'angle_values': angle_vals,
+        'surface_values': surface_values_sorted,
+        'n_3d': n_3d,
+        'n_2d_angle': n_2d_angle,
+        'n_2d_surface': n_2d_surface,
+        'n_labels': n_3d + n_2d_angle + n_2d_surface,
+        'coeff_modes': coeff_modes,
     }
 
     return mat_data, stats

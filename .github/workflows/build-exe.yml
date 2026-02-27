@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-2022
@@ -17,22 +20,45 @@ jobs:
           architecture: 'x64'
 
       - name: Install dependencies
-        run: pip install customtkinter scipy numpy pyinstaller
+        run: pip install customtkinter scipy numpy Pillow pyinstaller
 
       - name: Build EXE
-        run: pyinstaller --noconfirm --windowed --onefile --name "AVLParser" --add-data "parse_avl.py;." --hidden-import customtkinter app.py
+        run: pyinstaller --noconfirm --windowed --onefile --name "AVLParser" --icon "icon.ico" --add-data "parse_avl.py;." --add-data "icon.png;." --hidden-import customtkinter app.py
 
-      - name: Create release zip
-        run: Compress-Archive -Path "dist/AVLParser.exe" -DestinationPath "dist/AVLParser-Windows-x64.zip"
+      - name: Package test files
+        run: Compress-Archive -Path "test_files_new\*" -DestinationPath "dist\AVL-Test-Files.zip"
 
-      - name: Upload EXE
+      - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
           name: AVLParser-Windows-x64
           path: dist/AVLParser.exe
 
-      - name: Upload ZIP
-        uses: actions/upload-artifact@v4
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> $env:GITHUB_OUTPUT
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
         with:
-          name: AVLParser-Windows-x64-zip
-          path: dist/AVLParser-Windows-x64.zip
+          tag_name: latest
+          name: AVL Parser — Latest Build
+          body: |
+            **Latest build** from `main` branch (commit ${{ steps.sha.outputs.short }}).
+
+            ### Downloads
+            - **AVLParser.exe** — Windows application (double-click to run)
+            - **AVL-Test-Files.zip** — Sample AVL output files for testing (2D and 3D)
+
+            ### What's included in test files
+            - `flap/`, `aileron/`, `elevator/`, `rudder/` — Single-surface 2D test data
+            - `beta/` — Beta variable 2D test data
+            - `3d_tests/alpha_flap/` — 3D: Alpha × Mach × FLAP
+            - `3d_tests/beta_elev/` — 3D: Beta × Mach × ELEV
+            - `3d_tests/alpha_multi_surface/` — 3D: Alpha × Mach × FLAP + AIL
+            - `3d_tests/single_mach/`, `single_angle/` — Edge cases
+          files: |
+            dist/AVLParser.exe
+            dist/AVL-Test-Files.zip
+          make_latest: true
+          prerelease: false
