@@ -25,13 +25,14 @@ jobs:
       - name: Build EXE
         run: pyinstaller --noconfirm --windowed --onefile --name "AVLParser" --icon "icon.ico" --add-data "parse_avl.py;." --add-data "icon.png;." --hidden-import customtkinter app.py
 
-      - name: Package EXE
-        run: Compress-Archive -Path "dist\AVLParser.exe" -DestinationPath "dist\AVLParser-Windows-x64.zip"
+      - name: Package EXE + test files
+        run: |
+          New-Item -ItemType Directory -Path "dist\AVLParser" -Force
+          Copy-Item "dist\AVLParser.exe" "dist\AVLParser\"
+          Copy-Item -Recurse "test_files_new" "dist\AVLParser\test_files"
+          Compress-Archive -Path "dist\AVLParser\*" -DestinationPath "dist\AVLParser-Windows-x64.zip"
 
-      - name: Package test files
-        run: Compress-Archive -Path "test_files_new\*" -DestinationPath "dist\AVL-Test-Files.zip"
-
-      - name: Upload EXE artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: AVLParser-Windows-x64
@@ -49,11 +50,10 @@ jobs:
           body: |
             **Latest build** from `main` branch (commit ${{ steps.sha.outputs.short }}).
 
-            ### Downloads
-            - **AVLParser-Windows-x64.zip** — Windows application (extract and double-click to run)
-            - **AVL-Test-Files.zip** — Sample AVL output files for testing (2D and 3D)
+            ### Download
+            **AVLParser-Windows-x64.zip** — Contains the app and sample test files.
 
-            ### What's included in test files
+            ### What's inside
             - `flap/`, `aileron/`, `elevator/`, `rudder/` — Single-surface 2D test data
             - `beta/` — Beta variable 2D test data
             - `3d_tests/alpha_flap/` — 3D: Alpha × Mach × FLAP
@@ -62,6 +62,5 @@ jobs:
             - `3d_tests/single_mach/`, `single_angle/` — Edge cases
           files: |
             dist/AVLParser-Windows-x64.zip
-            dist/AVL-Test-Files.zip
           make_latest: true
           prerelease: false
