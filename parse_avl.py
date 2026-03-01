@@ -74,6 +74,15 @@ PAIRABLE_VARS = {
     'RUDD':  r'RUDD\s*=\s*([-\d.]+)',
 }
 
+# --- Pre-compiled regex patterns (avoids recompiling per file) ---
+_RE_MACH = re.compile(r'Mach\s*=\s*([\d.]+)')
+_RE_PAIRABLE = {name: re.compile(pat) for name, pat in PAIRABLE_VARS.items()}
+_RE_STANDARD = {
+    label: re.compile(r'(?<![A-Za-z])' + re.escape(label) + r'\s*=\s*([-\d.]+)')
+    for label in STANDARD_LABELS
+}
+_RE_SPECIAL = {label: re.compile(pat) for label, pat in SPECIAL_PATTERNS.items()}
+
 # Control surface name -> derivative suffix mapping
 SURFACE_SUFFIX = {'FLAP': 'd01', 'AIL': 'd02', 'ELEV': 'd03', 'RUDD': 'd04'}
 SUFFIX_TO_SURFACE = {v: k for k, v in SURFACE_SUFFIX.items()}
@@ -144,33 +153,32 @@ def parse_file(filepath):
         raise AVLFormatError(filename, "not an AVL output file")
 
     # Extract Mach (always required)
-    mach_match = re.search(r'Mach\s*=\s*([\d.]+)', text)
+    mach_match = _RE_MACH.search(text)
     if not mach_match:
         raise AVLFormatError(filename, "Mach value not found")
     mach = float(mach_match.group(1))
 
     # Extract all pairable variables (None if not found)
     run_vars = {}
-    for var_name, pattern in PAIRABLE_VARS.items():
-        m = re.search(pattern, text)
+    for var_name, compiled in _RE_PAIRABLE.items():
+        m = compiled.search(text)
         run_vars[var_name] = float(m.group(1)) if m else None
 
     result = {}
     warnings = []
 
-    # Standard labels: use lookbehind to prevent partial matches
-    for label in STANDARD_LABELS:
-        pattern = r'(?<![A-Za-z])' + re.escape(label) + r'\s*=\s*([-\d.]+)'
-        m = re.search(pattern, text)
+    # Standard labels: use pre-compiled lookbehind patterns
+    for label, compiled in _RE_STANDARD.items():
+        m = compiled.search(text)
         if m:
             result[label] = float(m.group(1))
         else:
             warnings.append(label)
             result[label] = None
 
-    # Special labels with custom patterns
-    for label, pattern in SPECIAL_PATTERNS.items():
-        m = re.search(pattern, text)
+    # Special labels with pre-compiled custom patterns
+    for label, compiled in _RE_SPECIAL.items():
+        m = compiled.search(text)
         if m:
             result[label] = float(m.group(1))
         else:
@@ -192,11 +200,12 @@ def validate_file(filepath):
 
     Returns (True, info_string) if valid, (False, error_string) if not.
     Only Mach is required. The info string shows all detected run variables.
+    Reads only the first 2 KB for speed — header + run variables appear early.
     """
     filename = os.path.basename(filepath)
     try:
         with open(filepath, 'r', encoding='utf-8', errors='strict') as f:
-            text = f.read()
+            text = f.read(2048)
     except PermissionError:
         return False, "permission denied"
     except UnicodeDecodeError:
@@ -207,14 +216,14 @@ def validate_file(filepath):
     if 'Vortex Lattice Output' not in text:
         return False, "not an AVL output file"
 
-    mach_match = re.search(r'Mach\s*=\s*([\d.]+)', text)
+    mach_match = _RE_MACH.search(text)
     if not mach_match:
         return False, "Mach value not found"
 
     # Build info string with all detected pairable variables
     parts = [f"Mach={float(mach_match.group(1))}"]
-    for var_name, pattern in PAIRABLE_VARS.items():
-        m = re.search(pattern, text)
+    for var_name, compiled in _RE_PAIRABLE.items():
+        m = compiled.search(text)
         if m:
             parts.append(f"{var_name}={float(m.group(1))}")
     return True, ", ".join(parts)
@@ -254,6 +263,14 @@ def process_files(filepaths, second_var='Alpha'):
     data = {}
     key_to_file = {}   # {(mach, var_val): filename}
 
+    # Pre-compute the list of variables to check for non-zero values
+    # (only used when pairing by Alpha or Beta, not by a control surface)
+    _needs_zero_check = second_var not in SURFACE_SUFFIX
+    if _needs_zero_check:
+        check_vars = list(SURFACE_SUFFIX)
+        opposite = 'Beta' if second_var == 'Alpha' else 'Alpha'
+        check_vars.append(opposite)
+
     for filepath in filepaths:
         filename = os.path.basename(filepath)
         try:
@@ -270,6 +287,18 @@ def process_files(filepaths, second_var='Alpha'):
         if var_val is None:
             skipped.append((filename, f"{second_var} value not found"))
             continue
+
+        # When pairing by Alpha or Beta, skip files with non-zero control
+        # surfaces or non-zero opposite angle (Alpha↔Beta)
+        if _needs_zero_check:
+            nonzero = [
+                name for name in check_vars
+                if run_vars.get(name) is not None and run_vars[name] != 0.0
+            ]
+            if nonzero:
+                vals_str = ", ".join(f"{n}={run_vars[n]}" for n in nonzero)
+                skipped.append((filename, f"non-zero values: {vals_str}"))
+                continue
 
         # Track missing labels per file
         if warnings:
@@ -390,6 +419,18 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
     angle_set = set()
     surface_value_sets = {s: set() for s in SURFACE_SUFFIX}
 
+    # Pre-compute label groups per surface (coeff_modes is constant)
+    _labels_3d = {}
+    _labels_2d_angle = {}
+    _labels_2d_surface = {}
+    for sname in SURFACE_SUFFIX:
+        sl = SURFACE_COEFF_GROUPS[sname]
+        _labels_3d[sname] = [l for l in sl if coeff_modes.get(l) == '3d']
+        _labels_2d_angle[sname] = [l for l in sl
+                                   if coeff_modes.get(l, '2d_angle') == '2d_angle']
+        _labels_2d_surface[sname] = [l for l in sl
+                                     if coeff_modes.get(l) == '2d_surface']
+
     parsed_count = 0
 
     for filepath in filepaths:
@@ -426,13 +467,9 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
 
             surface_value_sets[surface_name].add(surface_val)
 
-            # Split labels into three groups by mode
-            surface_labels = SURFACE_COEFF_GROUPS[surface_name]
-            labels_3d = [l for l in surface_labels if coeff_modes.get(l) == '3d']
-            labels_2d_angle = [l for l in surface_labels
-                               if coeff_modes.get(l, '2d_angle') == '2d_angle']
-            labels_2d_surface = [l for l in surface_labels
-                                 if coeff_modes.get(l) == '2d_surface']
+            labels_3d = _labels_3d[surface_name]
+            labels_2d_angle = _labels_2d_angle[surface_name]
+            labels_2d_surface = _labels_2d_surface[surface_name]
 
             # 3D data: needs angle_val
             if angle_val is not None and labels_3d:
@@ -581,6 +618,113 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
     }
 
     return mat_data, stats
+
+
+# --- Labels that are NOT control-surface derivatives ---
+_CS_SUFFIXES = set(SURFACE_SUFFIX.values())        # {'d01','d02','d03','d04'}
+NON_CS_LABELS = [l for l in ALL_LABELS if not any(s in l for s in _CS_SUFFIXES)]
+
+
+def process_files_full(filepaths, angle_var='Alpha', coeff_modes=None,
+                        progress_cb=None):
+    """Combined export: 2D tables for Alpha & Beta + 3D tables for control surfaces.
+
+    Non-CS coefficients come from 2D processing (Alpha×Mach and Beta×Mach).
+    CS coefficients come from 3D processing.
+
+    Args:
+        filepaths: list of file paths to parse.
+        angle_var: 'Alpha' or 'Beta' — the angle axis for the 3D section.
+        coeff_modes: dict {label: mode} for 3D coefficient modes.
+        progress_cb: optional callback(step, total) called after each pass.
+
+    Returns:
+        (mat_data, full_stats) where mat_data is ready for scipy.io.savemat().
+    Raises:
+        ValueError if all three processing calls fail.
+    """
+    mat_data = {}
+    alpha_stats = None
+    beta_stats = None
+    td_stats = None
+    errors = []
+
+    # --- Alpha 2D section ---
+    try:
+        alpha_data, alpha_stats = process_files(filepaths, second_var='Alpha')
+        # Rename axes
+        mat_data['Alpha_values'] = alpha_data.pop('Alpha_values')
+        mat_data['Alpha_Mach_values'] = alpha_data.pop('Mach_values')
+        # Copy only non-CS coefficients
+        for label in NON_CS_LABELS:
+            if label in alpha_data:
+                mat_data[label] = alpha_data[label]
+    except ValueError as e:
+        errors.append(f"Alpha 2D: {e}")
+
+    if progress_cb:
+        progress_cb(1, 3)
+
+    # --- Beta 2D section ---
+    try:
+        beta_data, beta_stats = process_files(filepaths, second_var='Beta')
+        mat_data['Beta_values'] = beta_data.pop('Beta_values')
+        mat_data['Beta_Mach_values'] = beta_data.pop('Mach_values')
+        for label in NON_CS_LABELS:
+            if label in beta_data:
+                mat_data[f'Beta_{label}'] = beta_data[label]
+    except ValueError as e:
+        errors.append(f"Beta 2D: {e}")
+
+    if progress_cb:
+        progress_cb(2, 3)
+
+    # --- 3D section ---
+    try:
+        td_data, td_stats = process_files_3d(
+            filepaths, angle_var=angle_var, coeff_modes=coeff_modes
+        )
+        mat_data['Mach_values'] = td_data.pop('Mach_values')
+        # Angle values — use 'Angle_values' to avoid conflict with Alpha_values
+        angle_key = f'{angle_var}_values'
+        if angle_key in td_data:
+            mat_data['Angle_values'] = td_data.pop(angle_key)
+        mat_data['Angle_var'] = np.array([angle_var])
+        # Surface value arrays
+        for surface in SURFACE_SUFFIX:
+            key = f'{surface}_values'
+            if key in td_data:
+                mat_data[key] = td_data.pop(key)
+        # CS coefficients
+        for key, val in td_data.items():
+            mat_data[key] = val
+    except ValueError as e:
+        errors.append(f"3D: {e}")
+
+    if progress_cb:
+        progress_cb(3, 3)
+
+    if not mat_data:
+        raise ValueError(
+            "No valid data from any section.\n\n" + "\n".join(errors)
+        )
+
+    # Count labels per section
+    n_alpha = sum(1 for l in NON_CS_LABELS if l in mat_data) if alpha_stats else 0
+    n_beta = sum(1 for l in NON_CS_LABELS if f'Beta_{l}' in mat_data) if beta_stats else 0
+    n_td = (td_stats['n_labels'] if td_stats else 0)
+
+    full_stats = {
+        'alpha_stats': alpha_stats,
+        'beta_stats': beta_stats,
+        'td_stats': td_stats,
+        'n_alpha_labels': n_alpha,
+        'n_beta_labels': n_beta,
+        'n_td_labels': n_td,
+        'errors': errors,
+    }
+
+    return mat_data, full_stats
 
 
 # --- Main ---
