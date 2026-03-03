@@ -31,7 +31,7 @@ except ImportError:
 # Ensure imports work when running from any directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from parse_avl import (process_files, process_files_3d, process_files_full,
-                        validate_file, ALL_LABELS, PAIRABLE_VARS,
+                        parse_file, validate_file, ALL_LABELS, PAIRABLE_VARS,
                         SURFACE_SUFFIX, SURFACE_COEFF_GROUPS)
 
 from scipy.io import savemat
@@ -482,12 +482,45 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         )
         self.pair_menu.pack(side="left")
 
+        self.check_2d_conflicts = ctk.BooleanVar(value=True)
+        self.chk_2d = ctk.CTkCheckBox(
+            self.panel_2d, text="Single angle/deflection",
+            variable=self.check_2d_conflicts,
+            font=ctk.CTkFont(size=11), checkbox_width=16, checkbox_height=16)
+        self.chk_2d.pack(side="right")
+
         # 3D Panel
         self.panel_3d = ctk.CTkFrame(self.options_container, fg_color="transparent")
         self._build_3d_panel()
 
         # 2D panel shown by default
         self.panel_2d.pack(fill="x")
+
+        # Validation checkboxes (compact, only visible in 3D mode)
+        self.check_single_angle = ctk.BooleanVar(value=True)
+        self.check_single_defl = ctk.BooleanVar(value=True)
+
+        self.validation_frame = ctk.CTkFrame(right_pane, fg_color="transparent")
+
+        _chk_font = ctk.CTkFont(size=11)
+        self.chk_angle = ctk.CTkCheckBox(
+            self.validation_frame, text="Single angle",
+            variable=self.check_single_angle,
+            font=_chk_font, checkbox_width=16, checkbox_height=16)
+        self.chk_angle.pack(side="left", padx=(0, 10))
+
+        self.chk_defl = ctk.CTkCheckBox(
+            self.validation_frame, text="Single deflection",
+            variable=self.check_single_defl,
+            font=_chk_font, checkbox_width=16, checkbox_height=16)
+        self.chk_defl.pack(side="left")
+
+        self.check_fa_skip = ctk.BooleanVar(value=True)
+        self.chk_fa_skip = ctk.CTkCheckBox(
+            self.validation_frame, text="Skip conflicts",
+            variable=self.check_fa_skip,
+            font=_chk_font, checkbox_width=16, checkbox_height=16)
+        # Not packed yet — shown only in Full Analysis mode
 
         # Export button (bottom of right pane)
         self.export_btn = ctk.CTkButton(right_pane, text="Export .mat",
@@ -526,6 +559,12 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
         # Export
         Tooltip(self.export_btn, "Export parsed data to a MATLAB .mat file")
+
+        # Validation checkboxes
+        Tooltip(self.chk_2d, "Skip files with multiple non-zero angles or deflections")
+        Tooltip(self.chk_angle, "Block export if any file has both Alpha and Beta non-zero")
+        Tooltip(self.chk_defl, "Block export if any file has multiple control surfaces non-zero")
+        Tooltip(self.chk_fa_skip, "Skip conflicting files in Alpha and Beta 2D passes")
 
     def _build_3d_panel(self):
         """Build the 3D mode options panel (Alpha/Beta radio + tabbed coefficient controls)."""
@@ -674,10 +713,19 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         if value == "2D Tables":
             self.panel_3d.pack_forget()
             self.panel_2d.pack(fill="x")
-        else:
-            # Both "3D Tables" and "Full Analysis" use the 3D panel
+            self.chk_fa_skip.pack_forget()
+            self.validation_frame.pack_forget()
+        elif value == "3D Tables":
             self.panel_2d.pack_forget()
             self.panel_3d.pack(fill="x")
+            self.chk_fa_skip.pack_forget()
+            self.validation_frame.pack(fill="x", padx=12, pady=(4, 0), side="bottom")
+        else:
+            # Full Analysis — show all 3 checkboxes
+            self.panel_2d.pack_forget()
+            self.panel_3d.pack(fill="x")
+            self.chk_fa_skip.pack(side="left", padx=(10, 0))
+            self.validation_frame.pack(fill="x", padx=12, pady=(4, 0), side="bottom")
 
     # --- Configuration history & presets ---
 
@@ -1090,12 +1138,129 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         self._set_status(f"Processing... ({step}/{total})")
         self.update_idletasks()
 
+    def _validate_files_pre_export(self):
+        """Check files for angle and deflection conflicts before export.
+
+        Returns (ok, angle_violations, defl_violations) where each violations
+        list contains (filename, detail_string) tuples.
+        """
+        check_angle = self.check_single_angle.get()
+        check_defl = self.check_single_defl.get()
+        angle_violations = []
+        defl_violations = []
+
+        for filepath in self.filepaths:
+            filename = os.path.basename(filepath)
+            try:
+                _mach, run_vars, _coeffs, _warns = parse_file(filepath)
+            except Exception:
+                continue  # skip — will be caught during actual processing
+
+            if check_angle:
+                alpha = run_vars.get('Alpha')
+                beta = run_vars.get('Beta')
+                if alpha is not None and alpha != 0 and beta is not None and beta != 0:
+                    angle_violations.append(
+                        (filename, f"Alpha={alpha}, Beta={beta}"))
+
+            if check_defl:
+                nonzero = []
+                for surface in ('FLAP', 'AIL', 'ELEV', 'RUDD'):
+                    val = run_vars.get(surface)
+                    if val is not None and val != 0:
+                        nonzero.append(f"{surface}={val}")
+                if len(nonzero) > 1:
+                    defl_violations.append((filename, ", ".join(nonzero)))
+
+        ok = not angle_violations and not defl_violations
+        return ok, angle_violations, defl_violations
+
+    def _show_validation_warning(self, angle_violations, defl_violations):
+        """Show an attention-grabbing dialog listing validation violations."""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Export Blocked")
+        dlg.geometry("540x420")
+        dlg.resizable(True, True)
+        dlg.transient(self)
+
+        total = len(angle_violations) + len(defl_violations)
+
+        # --- Red warning banner with icon ---
+        banner = ctk.CTkFrame(dlg, fg_color=("#e53935", "#b71c1c"),
+                               corner_radius=0, height=56)
+        banner.pack(fill="x")
+        banner.pack_propagate(False)
+        ctk.CTkLabel(banner,
+                      text="\u26A0",
+                      font=ctk.CTkFont(size=24),
+                      text_color="#FFD600",
+                      anchor="center", width=40
+                      ).pack(side="left", padx=(14, 0))
+        ctk.CTkLabel(banner,
+                      text=f"Export blocked  \u2014  {total} violation{'s' if total != 1 else ''}",
+                      font=ctk.CTkFont(size=15, weight="bold"),
+                      text_color="white",
+                      anchor="w").pack(side="left", padx=(6, 16), expand=True, fill="x")
+
+        # --- Subtitle ---
+        ctk.CTkLabel(dlg,
+                      text="The following files have conflicting parameters.\n"
+                           "Fix the files or uncheck the validation options to proceed.",
+                      font=ctk.CTkFont(size=12),
+                      text_color=("gray40", "gray65"),
+                      anchor="w", justify="left"
+                      ).pack(fill="x", padx=18, pady=(10, 6))
+
+        # --- Scrollable violation list ---
+        text_frame = ctk.CTkFrame(dlg, corner_radius=6,
+                                   border_width=1,
+                                   border_color=("#d32f2f", "#c62828"))
+        text_frame.pack(fill="both", expand=True, padx=18, pady=(0, 10))
+
+        textbox = ctk.CTkTextbox(text_frame, font=ctk.CTkFont(family="Courier", size=12),
+                                  wrap="word", activate_scrollbars=True)
+        textbox.pack(fill="both", expand=True, padx=4, pady=4)
+
+        if angle_violations:
+            textbox.insert("end", "BOTH ANGLES NON-ZERO\n")
+            textbox.insert("end", "-" * 44 + "\n")
+            for name, detail in angle_violations:
+                textbox.insert("end", f"  {name}\n")
+                textbox.insert("end", f"    -> {detail}\n\n")
+
+        if angle_violations and defl_violations:
+            textbox.insert("end", "\n")
+
+        if defl_violations:
+            textbox.insert("end", "MULTIPLE DEFLECTIONS NON-ZERO\n")
+            textbox.insert("end", "-" * 44 + "\n")
+            for name, detail in defl_violations:
+                textbox.insert("end", f"  {name}\n")
+                textbox.insert("end", f"    -> {detail}\n\n")
+
+        textbox.configure(state="disabled")
+
+        # --- Dismiss button ---
+        ctk.CTkButton(dlg, text="OK", width=120, height=36,
+                       fg_color=("#d32f2f", "#b71c1c"),
+                       hover_color=("#b71c1c", "#8e0000"),
+                       command=dlg.destroy).pack(pady=(0, 14))
+
+        dlg.after(200, dlg.grab_set)
+
     def export_mat(self):
         if not self.filepaths:
             messagebox.showwarning("No files", "Please add AVL files first.")
             return
 
         mode = self.mode_var.get()
+
+        # Pre-export validation (3D Tables and Full Analysis)
+        if mode in ("3D Tables", "Full Analysis") and (self.check_single_angle.get() or self.check_single_defl.get()):
+            ok, angle_viol, defl_viol = self._validate_files_pre_export()
+            if not ok:
+                self._show_validation_warning(angle_viol, defl_viol)
+                return
 
         # Snapshot all UI values before spawning the worker thread
         filepaths = list(self.filepaths)
@@ -1104,8 +1269,10 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
             coeff_modes = {}
             for label, var in self.coeff_mode_vars.items():
                 coeff_modes[label] = DISPLAY_TO_MODE[var.get()]
+            fa_skip = self.check_fa_skip.get() if mode == "Full Analysis" else False
         else:
             sv = self.second_var.get()
+            skip_conflicts = self.check_2d_conflicts.get()
             angle = None
             coeff_modes = None
 
@@ -1121,13 +1288,15 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
                     mat_data, stats = process_files_full(
                         filepaths, angle_var=angle, coeff_modes=coeff_modes,
                         progress_cb=self._progress_callback,
+                        skip_conflicts=fa_skip,
                     )
                 elif mode == "3D Tables":
                     mat_data, stats = process_files_3d(
                         filepaths, angle_var=angle, coeff_modes=coeff_modes
                     )
                 else:
-                    mat_data, stats = process_files(filepaths, second_var=sv)
+                    mat_data, stats = process_files(filepaths, second_var=sv,
+                                                       skip_conflicts=skip_conflicts)
                 self.after(0, lambda m=mode, d=mat_data, s=stats:
                            self._export_finish(m, d, s))
             except ValueError as e:

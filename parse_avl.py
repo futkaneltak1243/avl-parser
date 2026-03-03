@@ -229,7 +229,7 @@ def validate_file(filepath):
     return True, ", ".join(parts)
 
 
-def process_files(filepaths, second_var='Alpha'):
+def process_files(filepaths, second_var='Alpha', skip_conflicts=True):
     """Parse a list of AVL file paths and return a dict ready for savemat().
 
     Reads Mach and the selected second variable from inside each file.
@@ -264,9 +264,9 @@ def process_files(filepaths, second_var='Alpha'):
     key_to_file = {}   # {(mach, var_val): filename}
 
     # Pre-compute the list of variables to check for non-zero values
-    # (only used when pairing by Alpha or Beta, not by a control surface)
-    _needs_zero_check = second_var not in SURFACE_SUFFIX
-    if _needs_zero_check:
+    _needs_zero_check = skip_conflicts
+    _is_surface_pair = second_var in SURFACE_SUFFIX
+    if _needs_zero_check and not _is_surface_pair:
         check_vars = list(SURFACE_SUFFIX)
         opposite = 'Beta' if second_var == 'Alpha' else 'Alpha'
         check_vars.append(opposite)
@@ -288,17 +288,34 @@ def process_files(filepaths, second_var='Alpha'):
             skipped.append((filename, f"{second_var} value not found"))
             continue
 
-        # When pairing by Alpha or Beta, skip files with non-zero control
-        # surfaces or non-zero opposite angle (Alpha↔Beta)
+        # Skip files with conflicting non-zero angles/deflections
         if _needs_zero_check:
-            nonzero = [
-                name for name in check_vars
-                if run_vars.get(name) is not None and run_vars[name] != 0.0
-            ]
-            if nonzero:
-                vals_str = ", ".join(f"{n}={run_vars[n]}" for n in nonzero)
-                skipped.append((filename, f"non-zero values: {vals_str}"))
-                continue
+            if _is_surface_pair:
+                # Pairing by surface: skip if both angles non-zero or
+                # another surface is also non-zero
+                conflicts = []
+                alpha = run_vars.get('Alpha')
+                beta = run_vars.get('Beta')
+                if alpha and beta:
+                    conflicts.append(f"Alpha={alpha}, Beta={beta}")
+                other_surfaces = [
+                    s for s in SURFACE_SUFFIX if s != second_var
+                    and run_vars.get(s) is not None and run_vars[s] != 0.0
+                ]
+                if other_surfaces:
+                    conflicts.extend(f"{s}={run_vars[s]}" for s in other_surfaces)
+                if conflicts:
+                    skipped.append((filename, f"non-zero values: {', '.join(conflicts)}"))
+                    continue
+            else:
+                nonzero = [
+                    name for name in check_vars
+                    if run_vars.get(name) is not None and run_vars[name] != 0.0
+                ]
+                if nonzero:
+                    vals_str = ", ".join(f"{n}={run_vars[n]}" for n in nonzero)
+                    skipped.append((filename, f"non-zero values: {vals_str}"))
+                    continue
 
         # Track missing labels per file
         if warnings:
@@ -626,7 +643,7 @@ NON_CS_LABELS = [l for l in ALL_LABELS if not any(s in l for s in _CS_SUFFIXES)]
 
 
 def process_files_full(filepaths, angle_var='Alpha', coeff_modes=None,
-                        progress_cb=None):
+                        progress_cb=None, skip_conflicts=True):
     """Combined export: 2D tables for Alpha & Beta + 3D tables for control surfaces.
 
     Non-CS coefficients come from 2D processing (Alpha×Mach and Beta×Mach).
@@ -651,7 +668,8 @@ def process_files_full(filepaths, angle_var='Alpha', coeff_modes=None,
 
     # --- Alpha 2D section ---
     try:
-        alpha_data, alpha_stats = process_files(filepaths, second_var='Alpha')
+        alpha_data, alpha_stats = process_files(filepaths, second_var='Alpha',
+                                                     skip_conflicts=skip_conflicts)
         # Rename axes
         mat_data['Alpha_values'] = alpha_data.pop('Alpha_values')
         mat_data['Alpha_Mach_values'] = alpha_data.pop('Mach_values')
@@ -667,7 +685,8 @@ def process_files_full(filepaths, angle_var='Alpha', coeff_modes=None,
 
     # --- Beta 2D section ---
     try:
-        beta_data, beta_stats = process_files(filepaths, second_var='Beta')
+        beta_data, beta_stats = process_files(filepaths, second_var='Beta',
+                                                    skip_conflicts=skip_conflicts)
         mat_data['Beta_values'] = beta_data.pop('Beta_values')
         mat_data['Beta_Mach_values'] = beta_data.pop('Mach_values')
         for label in NON_CS_LABELS:
