@@ -169,6 +169,13 @@ class ValueSetCard(ctk.CTkFrame):
                 if val in values:
                     return f"Duplicate value {part} in {field_name} values."
                 values.append(val)
+            # Mach must be subsonic (AVL uses vortex lattice method)
+            if field_name == "Mach":
+                for v in values:
+                    if v <= 0 or v >= 1.0:
+                        return (f"Mach {v} is out of range. "
+                                "Values must be between 0 and 1 (subsonic only).\n"
+                                "AVL cannot compute supersonic flows.")
         return None
 
     def get_data(self):
