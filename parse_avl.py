@@ -12,6 +12,16 @@ MATLAB usage:
     Mach_values          % [0.02, 0.05, 0.1, 0.15, 0.2]
     CLtot                % 13x5 matrix (Alpha rows x Mach columns)
     plot(Alpha_values, CLtot(:,3))   % plot CL vs Alpha at Mach 0.1
+
+###############################################################################
+# CRITICAL SAFETY RULE — AVL EXECUTABLE
+#
+# This app MUST use "avl352.exe" EXCLUSIVELY when running AVL analysis.
+# DO NOT use avl_mac or any other binary. DO NOT add OS-based binary switching.
+# avl_mac exists only for local macOS dev testing — NEVER in production code.
+# This software is used by aircraft engineers — lives depend on it.
+# See CLAUDE.md for full details.
+###############################################################################
 """
 
 import os

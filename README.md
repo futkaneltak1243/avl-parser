@@ -1,10 +1,14 @@
 # AVL Parser
 
+> **CRITICAL SAFETY RULE — AVL EXECUTABLE**
+>
+> This app ships on **Windows only** and **MUST use `avl352.exe` exclusively** for all AVL analysis. Do NOT substitute any other AVL binary (including `avl_mac`). This software is used by aircraft engineers — lives depend on the correct executable. See `CLAUDE.md` for full details.
+
 A desktop application that parses [AVL (Athena Vortex Lattice)](https://web.mit.edu/drela/Public/web/avl/) output files and exports aerodynamic coefficients to `.mat` files for MATLAB.
 
 ## Download
 
-**Windows:** Download `AVLParser.exe` from the [Releases](https://github.com/futkaneltak1243/avl-parser/releases/tag/latest) page.
+**Windows:** Download `AVLParser.exe` from the [Releases](https://github.com/futkaneltak1243/avl-parser/releases/tag/v2.0) page.
 Sample test files are also available as `AVL-Test-Files.zip`.
 
 ## Features
@@ -126,4 +130,4 @@ Pushes to `main` trigger a GitHub Actions build automatically. To trigger manual
 gh workflow run build-exe.yml
 ```
 
-The `.exe` and test files are available on the [Releases](https://github.com/futkaneltak1243/avl-parser/releases/tag/latest) page.
+The `.exe` and test files are available on the [Releases](https://github.com/futkaneltak1243/avl-parser/releases/tag/v2.0) page.

@@ -23,12 +23,13 @@ jobs:
         run: pip install customtkinter scipy numpy Pillow pyinstaller
 
       - name: Build EXE
-        run: pyinstaller --noconfirm --windowed --onefile --name "AVLParser" --icon "icon.ico" --add-data "parse_avl.py;." --add-data "icon.png;." --hidden-import customtkinter app.py
+        run: pyinstaller --noconfirm --windowed --onefile --name "AVLParser" --icon "icon.ico" --add-data "parse_avl.py;." --add-data "run_generator.py;." --add-data "run_generator_ui.py;." --add-data "icon.png;." --hidden-import customtkinter app.py
 
-      - name: Package EXE + test files
+      - name: Package EXE + test files + AVL
         run: |
           New-Item -ItemType Directory -Path "dist\AVLParser" -Force
           Copy-Item "dist\AVLParser.exe" "dist\AVLParser\"
+          Copy-Item "friend files\avl352.exe" "dist\AVLParser\"
           Copy-Item -Recurse "test_files_new" "dist\AVLParser\test_files"
           Compress-Archive -Path "dist\AVLParser\*" -DestinationPath "dist\AVLParser-Windows-x64.zip"
 
@@ -45,21 +46,20 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: AVL Parser — Latest Build
+          tag_name: v2.0
+          name: AVL Parser v2.0
           body: |
-            **Latest build** from `main` branch (commit ${{ steps.sha.outputs.short }}).
+            **AVL Parser v2.0** (commit ${{ steps.sha.outputs.short }}).
+
+            ### What's new
+            - **File Generator** — Run AVL analysis directly from the app (generate output files from geometry + run cases)
+            - **Two-column layout** — Value sets on the left, global fixed values on the right
+            - **Config persistence** — Fixed parameter values saved across sessions
+            - **Input validation** — All inputs validated before generation
+            - **Bundled AVL** — `avl352.exe` included in the zip
 
             ### Download
-            **AVLParser-Windows-x64.zip** — Contains the app and sample test files.
-
-            ### What's inside
-            - `flap/`, `aileron/`, `elevator/`, `rudder/` — Single-surface 2D test data
-            - `beta/` — Beta variable 2D test data
-            - `3d_tests/alpha_flap/` — 3D: Alpha × Mach × FLAP
-            - `3d_tests/beta_elev/` — 3D: Beta × Mach × ELEV
-            - `3d_tests/alpha_multi_surface/` — 3D: Alpha × Mach × FLAP + AIL
-            - `3d_tests/single_mach/`, `single_angle/` — Edge cases
+            **AVLParser-Windows-x64.zip** — Contains the app, `avl352.exe`, and sample test files.
           files: |
             dist/AVLParser-Windows-x64.zip
           make_latest: true

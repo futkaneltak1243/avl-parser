@@ -4,6 +4,16 @@ Double-click to open. Select AVL files, then export to .mat for MATLAB.
 Works on macOS and Windows.
 
 Requirements: pip install customtkinter
+
+###############################################################################
+# CRITICAL SAFETY RULE — AVL EXECUTABLE
+#
+# This app MUST use "avl352.exe" EXCLUSIVELY when running AVL analysis.
+# DO NOT use avl_mac or any other binary. DO NOT add OS-based binary switching.
+# avl_mac exists only for local macOS dev testing — NEVER in production code.
+# This software is used by aircraft engineers — lives depend on it.
+# See CLAUDE.md for full details.
+###############################################################################
 """
 
 import json
@@ -34,8 +44,9 @@ from parse_avl import (process_files, process_files_3d, process_files_full,
                         parse_file, validate_file, ALL_LABELS, PAIRABLE_VARS,
                         SURFACE_SUFFIX, SURFACE_COEFF_GROUPS)
 
+from run_generator import FIXED_PARAMS, SURFACE_NAMES, find_avl_executable, run_avl
+from run_generator_ui import ValueSetCard
 from scipy.io import savemat
-
 
 # --- Theme ---
 ctk.set_appearance_mode("dark")
@@ -280,10 +291,23 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         ctk.CTkLabel(header_frame, text="AVL Parser",
                       font=ctk.CTkFont(size=22, weight="bold")).pack(side="left")
 
-        ctk.CTkLabel(header_frame,
-                      text="Parse AVL output files and export to .mat for MATLAB",
-                      font=ctk.CTkFont(size=12),
-                      text_color=("gray50", "gray60")).pack(side="left", padx=(12, 0))
+        self._subtitle_label = ctk.CTkLabel(
+            header_frame,
+            text="Parse AVL output files and export to .mat for MATLAB",
+            font=ctk.CTkFont(size=12),
+            text_color=("gray50", "gray60"))
+        self._subtitle_label.pack(side="left", padx=(12, 0))
+
+        self._app_mode_var = ctk.StringVar(value="Parser")
+        self._app_mode_switcher = ctk.CTkSegmentedButton(
+            header_frame,
+            values=["Parser", "File Generator"],
+            variable=self._app_mode_var,
+            command=self._on_app_mode_change,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=32,
+        )
+        self._app_mode_switcher.pack(side="right")
 
         # ==========================================================
         # STATUS BAR (pinned to bottom)
@@ -303,9 +327,16 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         self.progress_bar.set(0)
 
         # ==========================================================
-        # TWO-PANE SPLIT (files left, settings right)
+        # CONTENT CONTAINER (holds Parser and Generator frames)
         # ==========================================================
-        main_area = ctk.CTkFrame(self, corner_radius=10,
+        self._content_container = ctk.CTkFrame(self, fg_color="transparent")
+        self._content_container.pack(fill="both", expand=True)
+
+        # --- Parser frame ---
+        self._parser_frame = ctk.CTkFrame(self._content_container, fg_color="transparent")
+        self._parser_frame.pack(fill="both", expand=True)
+
+        main_area = ctk.CTkFrame(self._parser_frame, corner_radius=10,
                                   fg_color=("gray92", "gray17"))
         main_area.pack(fill="both", expand=True, padx=16, pady=(0, 10))
         main_area.columnconfigure(0, weight=2)   # left ~40%
@@ -531,7 +562,442 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
                                           hover_color=("#247a42", "#247a42"))
         self.export_btn.pack(fill="x", padx=12, pady=(8, 12), side="bottom")
 
+        # --- Generator frame (hidden by default) ---
+        self._generator_frame = ctk.CTkFrame(self._content_container,
+                                              fg_color="transparent")
+        self._build_generator_content()
+
         self._setup_tooltips()
+
+    # ==================================================================
+    # APP MODE SWITCHING (Parser <-> File Generator)
+    # ==================================================================
+
+    def _on_app_mode_change(self, value):
+        """Switch between Parser and File Generator views."""
+        if value == "Parser":
+            self._generator_frame.pack_forget()
+            self._parser_frame.pack(fill="both", expand=True)
+            self._subtitle_label.configure(
+                text="Parse AVL output files and export to .mat for MATLAB")
+            self._set_status("Ready")
+        else:
+            self._parser_frame.pack_forget()
+            self._generator_frame.pack(fill="both", expand=True)
+            self._subtitle_label.configure(
+                text="Run AVL analysis and generate output files")
+            self._set_status("File Generator ready")
+
+    # ==================================================================
+    # FILE GENERATOR — content and logic
+    # ==================================================================
+
+    def _load_generator_config(self):
+        """Load saved geometry path and fixed params from shared config file."""
+        self._gen_saved_params = {}
+        try:
+            with open(self._config_file) as f:
+                cfg = json.load(f)
+            gen = cfg.get("generator", {})
+            self._gen_geometry_path = gen.get("geometry_path", "")
+            self._gen_saved_params = gen.get("fixed_params", {})
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+    def _save_generator_config(self):
+        """Save geometry path and fixed params to shared config file."""
+        params = {}
+        for name, entry in self._gen_param_entries.items():
+            text = entry.get().strip()
+            try:
+                params[name] = float(text)
+            except ValueError:
+                params[name] = text
+        # Read existing config, update generator section, write back
+        try:
+            with open(self._config_file) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+        data["generator"] = {
+            "geometry_path": self._gen_geometry_path,
+            "fixed_params": params,
+        }
+        try:
+            with open(self._config_file, "w") as f:
+                json.dump(data, f, indent=2)
+        except OSError:
+            pass
+        self._gen_saved_params = params
+
+    def _build_generator_content(self):
+        """Build the File Generator content inside self._generator_frame."""
+        self._gen_cards = []
+        self._gen_param_entries = {}
+        self._gen_geometry_path = ""
+        self._gen_grand_total_label = None
+        self._load_generator_config()
+
+        gen_main = ctk.CTkFrame(self._generator_frame, corner_radius=10,
+                                 fg_color=("gray92", "gray17"))
+        gen_main.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        # --- Top: Geometry file picker ---
+        top = ctk.CTkFrame(gen_main, fg_color="transparent")
+        top.pack(fill="x", padx=12, pady=(10, 0))
+        self._build_gen_geometry_picker(top)
+
+        ctk.CTkFrame(gen_main, height=1,
+                      fg_color=("gray75", "gray35")).pack(fill="x", padx=12, pady=8)
+
+        # --- Two-column area ---
+        two_col = ctk.CTkFrame(gen_main, fg_color="transparent")
+        two_col.pack(fill="both", expand=True, padx=4)
+
+        # Left column: Value Sets
+        left_col = ctk.CTkFrame(two_col, fg_color="transparent")
+        left_col.pack(side="left", fill="both", expand=True, padx=(8, 4))
+
+        left_scroll = ctk.CTkScrollableFrame(left_col, fg_color="transparent")
+        left_scroll.pack(fill="both", expand=True)
+        self._build_gen_value_sets(left_scroll)
+
+        # Right column: Global Fixed Values
+        right_col = ctk.CTkFrame(two_col, fg_color="transparent")
+        right_col.pack(side="right", fill="both", padx=(4, 8))
+
+        right_scroll = ctk.CTkScrollableFrame(right_col, fg_color="transparent",
+                                               width=340)
+        right_scroll.pack(fill="both", expand=True)
+        self._build_gen_fixed_params(right_scroll)
+
+        # --- Bottom bar ---
+        bottom = ctk.CTkFrame(gen_main, fg_color="transparent")
+        bottom.pack(fill="x", padx=16, pady=(4, 10))
+
+        self._gen_status_label = ctk.CTkLabel(
+            bottom, text="",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray60"))
+        self._gen_status_label.pack(anchor="w", pady=(0, 2))
+
+        self._gen_grand_total_label = ctk.CTkLabel(
+            bottom, text="Grand total: 0 files",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray60"))
+        self._gen_grand_total_label.pack(anchor="e", pady=(0, 6))
+
+        self._gen_btn_action = ctk.CTkButton(
+            bottom, text="Generate Files",
+            height=40, corner_radius=8,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=("#2d8a4e", "#2d8a4e"),
+            hover_color=("#247a42", "#247a42"),
+            command=self._gen_generate
+        )
+        self._gen_btn_action.pack(fill="x")
+
+    def _build_gen_geometry_picker(self, parent):
+        section = ctk.CTkFrame(parent, fg_color="transparent")
+        section.pack(fill="x")
+
+        ctk.CTkLabel(section, text="Geometry File (.avl)",
+                      font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w")
+
+        row = ctk.CTkFrame(section, fg_color="transparent")
+        row.pack(fill="x", pady=(4, 0))
+
+        ctk.CTkButton(
+            row, text="Browse...",
+            height=28, width=90, font=ctk.CTkFont(size=11),
+            command=self._gen_browse_geometry
+        ).pack(side="left")
+
+        self._gen_geom_label = ctk.CTkLabel(
+            row, text=self._gen_geometry_path or "No file selected",
+            font=ctk.CTkFont(size=10),
+            text_color=("gray50", "gray60"),
+            anchor="w")
+        self._gen_geom_label.pack(side="left", padx=(8, 0), fill="x", expand=True)
+
+    def _gen_browse_geometry(self):
+        path = filedialog.askopenfilename(
+            title="Select AVL geometry file",
+            filetypes=[("AVL files", "*.avl"), ("All files", "*.*")],
+            parent=self)
+        if path:
+            self._gen_geometry_path = path
+            self._gen_geom_label.configure(text=path)
+            self._save_generator_config()
+
+    def _build_gen_fixed_params(self, parent):
+        section = ctk.CTkFrame(parent, fg_color="transparent")
+        section.pack(fill="x")
+
+        header_row = ctk.CTkFrame(section, fg_color="transparent")
+        header_row.pack(fill="x")
+
+        ctk.CTkLabel(header_row, text="Global Fixed Values",
+                      font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+
+        self._gen_update_btn = ctk.CTkButton(
+            header_row, text="Update", width=70, height=26,
+            font=ctk.CTkFont(size=11),
+            state="disabled",
+            command=self._gen_update_params)
+        self._gen_update_btn.pack(side="right")
+
+        ctk.CTkLabel(section,
+                      text="Shared across all generated files",
+                      font=ctk.CTkFont(size=10),
+                      text_color=("gray50", "gray60")).pack(anchor="w", pady=(0, 6))
+
+        grid = ctk.CTkFrame(section, fg_color="transparent")
+        grid.pack(fill="x")
+
+        all_params = list(FIXED_PARAMS) + [
+            ("pb/2V", 0.0, "", 5),
+            ("qc/2V", 0.0, "", 5),
+            ("rb/2V", 0.0, "", 5),
+        ]
+
+        cols = 2
+        for i, (name, default, _unit, _dec) in enumerate(all_params):
+            row = i // cols
+            col = i % cols
+
+            cell = ctk.CTkFrame(grid, fg_color="transparent")
+            cell.grid(row=row, column=col, padx=(0, 8), pady=2, sticky="ew")
+
+            ctk.CTkLabel(cell, text=f"{name}:",
+                          font=ctk.CTkFont(size=10),
+                          width=75, anchor="e").pack(side="left")
+            entry = ctk.CTkEntry(cell, width=80, height=26,
+                                  font=ctk.CTkFont(size=10))
+            # Use saved config value if available, otherwise use default
+            initial = self._gen_saved_params.get(name, default)
+            entry.insert(0, str(initial))
+            entry.pack(side="left", padx=(4, 0))
+            entry.bind("<KeyRelease>", lambda _e: self._gen_on_param_change())
+            self._gen_param_entries[name] = entry
+
+        for c in range(cols):
+            grid.columnconfigure(c, weight=1)
+
+        # If no saved params yet, save current defaults
+        if not self._gen_saved_params:
+            self._save_generator_config()
+
+    def _gen_on_param_change(self):
+        """Enable Update button if any param differs from saved config."""
+        for name, entry in self._gen_param_entries.items():
+            current = entry.get().strip()
+            saved = self._gen_saved_params.get(name)
+            if saved is not None:
+                # Compare as strings to handle formatting differences
+                if current != str(saved):
+                    self._gen_update_btn.configure(state="normal")
+                    return
+            else:
+                # No saved value — treat any non-empty entry as changed
+                if current:
+                    self._gen_update_btn.configure(state="normal")
+                    return
+        self._gen_update_btn.configure(state="disabled")
+
+    def _gen_update_params(self):
+        """Validate and save current fixed param values to config."""
+        if self._gen_collect_fixed_params() is None:
+            return  # validation failed — error dialog already shown
+        self._save_generator_config()
+        self._gen_update_btn.configure(state="disabled")
+        self._set_status("Fixed values saved")
+
+    def _build_gen_value_sets(self, parent):
+        header_row = ctk.CTkFrame(parent, fg_color="transparent")
+        header_row.pack(fill="x")
+
+        ctk.CTkLabel(header_row, text="Value Sets",
+                      font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+
+        ctk.CTkButton(
+            header_row, text="+ Add Value Set",
+            height=28, font=ctk.CTkFont(size=11),
+            fg_color="transparent", border_width=1,
+            border_color=("gray60", "gray40"),
+            text_color=("gray30", "gray80"),
+            hover_color=("gray85", "gray25"),
+            command=self._gen_add_value_set
+        ).pack(side="right")
+
+        self._gen_cards_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self._gen_cards_frame.pack(fill="x", pady=(6, 0))
+
+        self._gen_add_value_set()
+
+    def _gen_add_value_set(self):
+        idx = len(self._gen_cards) + 1
+        card = ValueSetCard(self._gen_cards_frame, idx,
+                             on_delete=self._gen_remove_value_set,
+                             on_change=self._gen_update_grand_total)
+        card.pack(fill="x", pady=(0, 6))
+        self._gen_cards.append(card)
+        self._gen_update_grand_total()
+
+    def _gen_remove_value_set(self, card):
+        if len(self._gen_cards) <= 1:
+            messagebox.showwarning("Cannot Remove",
+                                    "At least one value set is required.",
+                                    parent=self)
+            return
+        self._gen_cards.remove(card)
+        card.destroy()
+        for i, c in enumerate(self._gen_cards, 1):
+            c.set_index(i)
+        self._gen_update_grand_total()
+
+    def _gen_update_grand_total(self):
+        total = sum(c.get_file_count() for c in self._gen_cards)
+        if self._gen_grand_total_label is not None:
+            self._gen_grand_total_label.configure(text=f"Grand total: {total} files")
+
+    def _gen_collect_fixed_params(self):
+        params = {}
+        for name, entry in self._gen_param_entries.items():
+            text = entry.get().strip()
+            try:
+                params[name] = float(text)
+            except ValueError:
+                messagebox.showerror("Invalid Value",
+                                      f"'{name}' must be a number. Got: '{text}'",
+                                      parent=self)
+                entry.focus_set()
+                return None
+        return params
+
+    def _gen_collect_value_sets(self):
+        sets = []
+        for i, card in enumerate(self._gen_cards, 1):
+            err = card.validate()
+            if err:
+                messagebox.showerror(
+                    "Invalid Input",
+                    f"Value Set {i}: {err}",
+                    parent=self)
+                return None
+            data = card.get_data()
+            if data is None:
+                messagebox.showerror(
+                    "Incomplete Value Set",
+                    f"Value Set {i} is incomplete.\n"
+                    "Please enter Mach, angle, and surface values.",
+                    parent=self)
+                return None
+            sets.append(data)
+        return sets
+
+    def _gen_generate(self):
+        if not self._gen_geometry_path or not os.path.isfile(self._gen_geometry_path):
+            messagebox.showerror("No Geometry File",
+                                  "Please select a .avl geometry file first.",
+                                  parent=self)
+            return
+
+        fixed = self._gen_collect_fixed_params()
+        if fixed is None:
+            return
+
+        if not self._gen_cards:
+            messagebox.showerror("No Value Sets",
+                                  "Please add at least one value set.",
+                                  parent=self)
+            return
+
+        value_sets = self._gen_collect_value_sets()
+        if value_sets is None:
+            return
+
+        total = sum(
+            len(vs["mach_values"]) * len(vs["angle_values"]) * len(vs["surface_values"])
+            for vs in value_sets
+        )
+        if total == 0:
+            messagebox.showwarning("No Files",
+                                    "No files to generate. Add values first.",
+                                    parent=self)
+            return
+
+        folder = filedialog.askdirectory(
+            title=f"Select folder for {total} output files",
+            parent=self)
+        if not folder:
+            return
+
+        try:
+            avl_exe = find_avl_executable()
+        except FileNotFoundError as e:
+            messagebox.showerror("AVL Not Found", str(e), parent=self)
+            return
+
+        self._gen_btn_action.configure(state="disabled", text="Running AVL...")
+        self._gen_status_label.configure(
+            text=f"Running AVL on {total} cases...",
+            text_color=("gray30", "gray80"))
+        self._set_status(f"Running AVL on {total} cases...")
+
+        def _worker():
+            try:
+                count, filenames = run_avl(
+                    avl_exe, self._gen_geometry_path, folder, fixed, value_sets)
+                self.after(0, lambda: self._gen_on_avl_done(count, filenames, folder))
+            except Exception as e:
+                err_msg = str(e)
+                self.after(0, lambda: self._gen_on_avl_error(err_msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _gen_on_avl_done(self, count, filenames, folder):
+        self._gen_btn_action.configure(state="normal", text="Generate Files")
+        self._gen_status_label.configure(
+            text=f"Done! {count} files generated.",
+            text_color=("#2d8a4e", "#2d8a4e"))
+        self._set_status(f"Generated {count} files")
+        self._gen_show_report(count, filenames, folder)
+
+    def _gen_on_avl_error(self, error_msg):
+        self._gen_btn_action.configure(state="normal", text="Generate Files")
+        self._gen_status_label.configure(
+            text="AVL failed.",
+            text_color=("#c0392b", "#c0392b"))
+        self._set_status("AVL execution failed")
+        messagebox.showerror("AVL Error",
+                              f"AVL execution failed:\n\n{error_msg}",
+                              parent=self)
+
+    def _gen_show_report(self, count, filenames, folder):
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Generation Complete")
+        dlg.geometry("450x350")
+        dlg.transient(self)
+
+        ctk.CTkLabel(dlg, text=f"Generated {count} files",
+                      font=ctk.CTkFont(size=14, weight="bold")
+                      ).pack(padx=16, pady=(14, 4))
+
+        ctk.CTkLabel(dlg, text=f"Folder: {folder}",
+                      font=ctk.CTkFont(size=10),
+                      text_color=("gray50", "gray60"),
+                      wraplength=400).pack(padx=16, pady=(0, 8))
+
+        text = ctk.CTkTextbox(dlg, font=ctk.CTkFont(size=10))
+        text.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        text.insert("1.0", "\n".join(filenames))
+        text.configure(state="disabled")
+
+        ctk.CTkButton(dlg, text="OK", width=100,
+                       command=dlg.destroy).pack(pady=(0, 12))
+
+        dlg.after(200, dlg.grab_set)
 
     def _setup_tooltips(self):
         """Attach hover tooltips to all interactive widgets."""
