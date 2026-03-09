@@ -26,12 +26,16 @@ MATLAB usage:
 
 import os
 import re
+import sys
 import numpy as np
 from scipy.io import savemat
 
 # --- Configuration ---
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    SCRIPT_DIR = os.path.dirname(sys.executable)
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR = os.path.join(SCRIPT_DIR, 'test files')
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, 'output')
 

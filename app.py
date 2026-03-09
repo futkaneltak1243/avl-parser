@@ -38,8 +38,14 @@ except ImportError:
     _DnDMixin = object
     HAS_DND = False
 
+# Resolve app directory (next to EXE when frozen, else script dir)
+def _app_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
 # Ensure imports work when running from any directory
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _app_dir())
 from parse_avl import (process_files, process_files_3d, process_files_full,
                         parse_file, validate_file, ALL_LABELS, PAIRABLE_VARS,
                         SURFACE_SUFFIX, SURFACE_COEFF_GROUPS)
@@ -251,7 +257,7 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         self.minsize(800, 600)
 
         # Set window icon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.png')
+        icon_path = os.path.join(_app_dir(), 'icon.png')
         if os.path.isfile(icon_path):
             from PIL import Image, ImageTk
             icon_img = ImageTk.PhotoImage(Image.open(icon_path))
@@ -267,7 +273,7 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         self._history_navigating = False
         self._saved_configs = []
         self._config_file = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "avl_configs.json"
+            _app_dir(), "avl_configs.json"
         )
 
         self._build_ui()

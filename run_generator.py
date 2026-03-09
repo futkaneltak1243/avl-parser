@@ -245,7 +245,10 @@ AVL_EXE = "avl352.exe"
 # macOS dev-only binary (NEVER shipped in production)
 _AVL_MAC = "avl_mac"
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    _SCRIPT_DIR = os.path.dirname(sys.executable)
+else:
+    _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def find_avl_executable():
