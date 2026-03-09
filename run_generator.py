@@ -16,6 +16,7 @@ to produce stability derivative output files.
 
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -58,6 +59,10 @@ CONSTRAINT_NAMES = ["alpha", "beta", "pb/2V", "qc/2V", "rb/2V",
 
 ANGLE_ABBREVS = {"Alpha": "A", "Beta": "B"}
 SURFACE_NAMES = ["FLAP", "AIL", "ELEV", "RUDD"]
+
+# AVL 3.52 supports at most 25 run cases per .run file (NRMAX=25).
+# Exceeding this causes cases beyond 25 to be silently ignored.
+MAX_CASES_PER_RUN = 25
 
 
 def format_mach_scientific(value):
@@ -171,21 +176,19 @@ def build_run_case_block(case_number, case_name, alpha, beta, mach,
 
 
 def build_combined_cases_file(fixed_params, value_sets):
-    """Build a single .run file containing all cases from all value sets.
+    """Build run case blocks for all cases from all value sets.
 
     Returns:
-        (cases_content_string, list_of_case_names)
+        (list_of_block_strings, list_of_case_names)
+        Blocks are unnumbered — caller re-numbers them per batch.
     """
     blocks = []
     case_names = []
-    case_num = 0
 
     for vs in value_sets:
         for mach in vs["mach_values"]:
             for angle_val in vs["angle_values"]:
                 for surface_val in vs["surface_values"]:
-                    case_num += 1
-
                     if vs["angle_type"] == "Alpha":
                         alpha, beta = angle_val, 0.0
                     else:
@@ -200,7 +203,7 @@ def build_combined_cases_file(fixed_params, value_sets):
                     )
 
                     block = build_run_case_block(
-                        case_number=case_num,
+                        case_number=1,  # placeholder, re-numbered per batch
                         case_name=case_name,
                         alpha=alpha, beta=beta, mach=mach,
                         surfaces=surfaces,
@@ -210,7 +213,22 @@ def build_combined_cases_file(fixed_params, value_sets):
                     blocks.append(block)
                     case_names.append(case_name)
 
-    return "\n".join(blocks), case_names
+    return blocks, case_names
+
+
+def _renumber_blocks(blocks):
+    """Re-number a list of run case blocks sequentially from 1."""
+    renumbered = []
+    for i, block in enumerate(blocks, 1):
+        # Replace "Run case  N:" with "Run case  i:"
+        new_block = re.sub(
+            r'(Run case\s+)\d+(:)',
+            rf'\g<1>{i}\2',
+            block,
+            count=1,
+        )
+        renumbered.append(new_block)
+    return "\n".join(renumbered)
 
 
 def build_batch_script(case_names):
@@ -285,6 +303,9 @@ def find_avl_executable():
 def run_avl(avl_exe, geometry_file, output_dir, fixed_params, value_sets):
     """Run AVL to generate stability derivative output files.
 
+    Automatically splits into batches of MAX_CASES_PER_RUN (25) to stay
+    within AVL's run case limit.
+
     Args:
         avl_exe: path to AVL executable (must be avl352.exe in production)
         geometry_file: path to .avl geometry file
@@ -300,39 +321,42 @@ def run_avl(avl_exe, geometry_file, output_dir, fixed_params, value_sets):
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Build case definitions and batch script
-    cases_content, case_names = build_combined_cases_file(fixed_params, value_sets)
-    batch_script = build_batch_script(case_names)
+    # Build all case blocks and names
+    all_blocks, all_names = build_combined_cases_file(fixed_params, value_sets)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Write temp cases file
-        cases_path = os.path.join(tmpdir, "cases.run")
-        with open(cases_path, "w") as f:
-            f.write(cases_content)
+    created = []
 
-        # Run AVL from the output directory so ST writes files there
-        # Command: avl geometry.avl cases.run < batch_script
-        result = subprocess.run(
-            [avl_exe, geometry_file, cases_path],
-            input=batch_script,
-            cwd=output_dir,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+    # Process in batches of MAX_CASES_PER_RUN to avoid AVL's case limit
+    for chunk_start in range(0, len(all_names), MAX_CASES_PER_RUN):
+        chunk_blocks = all_blocks[chunk_start:chunk_start + MAX_CASES_PER_RUN]
+        chunk_names = all_names[chunk_start:chunk_start + MAX_CASES_PER_RUN]
 
-        if result.returncode != 0 and result.returncode != 1:
-            # AVL often exits with code 1 due to EOF on stdin — that's normal
-            raise RuntimeError(
-                f"AVL exited with code {result.returncode}.\n"
-                f"stderr: {result.stderr[:500]}"
+        cases_content = _renumber_blocks(chunk_blocks)
+        batch_script = build_batch_script(chunk_names)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cases_path = os.path.join(tmpdir, "cases.run")
+            with open(cases_path, "w") as f:
+                f.write(cases_content)
+
+            result = subprocess.run(
+                [avl_exe, geometry_file, cases_path],
+                input=batch_script,
+                cwd=output_dir,
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
 
-    # Check which output files were actually created
-    created = []
-    for name in case_names:
-        if os.path.isfile(os.path.join(output_dir, name)):
-            created.append(name)
+            if result.returncode != 0 and result.returncode != 1:
+                raise RuntimeError(
+                    f"AVL exited with code {result.returncode}.\n"
+                    f"stderr: {result.stderr[:500]}"
+                )
+
+        for name in chunk_names:
+            if os.path.isfile(os.path.join(output_dir, name)):
+                created.append(name)
 
     if not created:
         raise RuntimeError(

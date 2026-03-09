@@ -46,13 +46,16 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.0
-          name: AVL Parser v2.0
+          tag_name: v2.1
+          name: AVL Parser v2.1
           body: |
-            **AVL Parser v2.0** (commit ${{ steps.sha.outputs.short }}).
+            **AVL Parser v2.1** (commit ${{ steps.sha.outputs.short }}).
 
-            ### What's new
-            - **File Generator** — Run AVL analysis directly from the app (generate output files from geometry + run cases)
+            ### What's new in v2.1
+            - **Bugfix** — Fixed incorrect output files when generating more than 25 run cases. AVL has a 25-case limit per .run file; the generator now automatically batches runs to avoid silent data corruption.
+
+            ### v2.0 features
+            - **File Generator** — Run AVL analysis directly from the app
             - **Two-column layout** — Value sets on the left, global fixed values on the right
             - **Config persistence** — Fixed parameter values saved across sessions
             - **Input validation** — All inputs validated before generation
