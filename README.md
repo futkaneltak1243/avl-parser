@@ -8,7 +8,7 @@ A desktop application that parses [AVL (Athena Vortex Lattice)](https://web.mit.
 
 ## Download
 
-**Windows:** Download `AVLParser.exe` from the [Releases](https://github.com/futkaneltak1243/avl-parser/releases/tag/v2.0) page.
+**Windows:** Download `AVLParser.exe` from the [Releases](https://github.com/futkaneltak1243/avl-parser/releases/latest) page.
 Sample test files are also available as `AVL-Test-Files.zip`.
 
 ## Features
@@ -130,4 +130,4 @@ Pushes to `main` trigger a GitHub Actions build automatically. To trigger manual
 gh workflow run build-exe.yml
 ```
 
-The `.exe` and test files are available on the [Releases](https://github.com/futkaneltak1243/avl-parser/releases/tag/v2.0) page.
+The `.exe` and test files are available on the [Releases](https://github.com/futkaneltak1243/avl-parser/releases/latest) page.

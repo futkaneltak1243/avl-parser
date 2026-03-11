@@ -946,6 +946,8 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
             return
 
         self._gen_btn_action.configure(state="disabled", text="Running AVL...")
+        if self.export_btn.winfo_exists():
+            self.export_btn.configure(state="disabled")
         self._gen_status_label.configure(
             text=f"Running AVL on {total} cases...",
             text_color=("gray30", "gray80"))
@@ -964,6 +966,8 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
     def _gen_on_avl_done(self, count, filenames, folder):
         self._gen_btn_action.configure(state="normal", text="Generate Files")
+        if self.export_btn.winfo_exists():
+            self.export_btn.configure(state="normal")
         self._gen_status_label.configure(
             text=f"Done! {count} files generated.",
             text_color=("#2d8a4e", "#2d8a4e"))
@@ -972,6 +976,8 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
     def _gen_on_avl_error(self, error_msg):
         self._gen_btn_action.configure(state="normal", text="Generate Files")
+        if self.export_btn.winfo_exists():
+            self.export_btn.configure(state="normal")
         self._gen_status_label.configure(
             text="AVL failed.",
             text_color=("#c0392b", "#c0392b"))
@@ -1750,7 +1756,10 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
         self._set_status("Processing...")
         self._show_progress(determinate=(mode == "Full Analysis"))
-        self.export_btn.configure(state="disabled")
+        if self.export_btn.winfo_exists():
+            self.export_btn.configure(state="disabled")
+        if self._gen_btn_action.winfo_exists():
+            self._gen_btn_action.configure(state="disabled")
         self._last_progress_time = 0.0
 
         def _worker():
@@ -1785,14 +1794,20 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
     def _export_error(self, title, status_msg, detail):
         """Handle export errors back on the main thread."""
         self._hide_progress()
-        self.export_btn.configure(state="normal")
+        if self.export_btn.winfo_exists():
+            self.export_btn.configure(state="normal")
+        if self._gen_btn_action.winfo_exists():
+            self._gen_btn_action.configure(state="normal")
         self._set_status(status_msg)
         messagebox.showerror(title, detail)
 
     def _export_finish(self, mode, mat_data, stats):
         """Complete the export flow on the main thread (save dialog + report)."""
         self._hide_progress()
-        self.export_btn.configure(state="normal")
+        if self.export_btn.winfo_exists():
+            self.export_btn.configure(state="normal")
+        if self._gen_btn_action.winfo_exists():
+            self._gen_btn_action.configure(state="normal")
 
         # Record config to history on successful export
         if mode in ("3D Tables", "Full Analysis"):

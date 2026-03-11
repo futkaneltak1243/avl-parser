@@ -441,6 +441,8 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
     data_3d = {s: {} for s in SURFACE_SUFFIX}           # (mach, angle, surface_val)
     data_2d_angle = {s: {} for s in SURFACE_SUFFIX}      # (mach, angle)
     data_2d_surface = {s: {} for s in SURFACE_SUFFIX}    # (mach, surface_val)
+    # Temp storage for 2D-surface: collect all angles, then keep only zero-angle
+    _temp_2d_surface = {s: {} for s in SURFACE_SUFFIX}  # (mach, surface_val, angle)
     # Track which file produced each key for duplicate reporting
     key_to_file_3d = {s: {} for s in SURFACE_SUFFIX}
     key_to_file_2d_angle = {s: {} for s in SURFACE_SUFFIX}
@@ -529,19 +531,10 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
                 data_2d_angle[surface_name][key_2d] = coefficients
                 key_to_file_2d_angle[surface_name][key_2d] = filename
 
-            # 2D-surface data: keyed by (mach, surface_val)
-            if labels_2d_surface:
-                key_2d_s = (mach, surface_val)
-                if key_2d_s in data_2d_surface[surface_name]:
-                    old_file = key_to_file_2d_surface[surface_name][key_2d_s]
-                    if old_file != filename:
-                        duplicates_2d_surface.append((
-                            filename, surface_name,
-                            f"Mach={mach}, {surface_name}={surface_val}",
-                            old_file
-                        ))
-                data_2d_surface[surface_name][key_2d_s] = coefficients
-                key_to_file_2d_surface[surface_name][key_2d_s] = filename
+            # 2D-surface data: collect with angle, filter to zero-angle after loop
+            if labels_2d_surface and angle_val is not None:
+                key_temp = (mach, surface_val, angle_val)
+                _temp_2d_surface[surface_name][key_temp] = (coefficients, filename)
 
     if parsed_count == 0:
         if skipped:
@@ -552,6 +545,24 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
 
     machs = sorted(mach_set)
     angle_vals = sorted(angle_set)
+
+    # Build data_2d_surface from zero-angle entries only
+    zero_angle = min(angle_set, key=lambda a: abs(a)) if angle_set else 0.0
+    for surface_name in SURFACE_SUFFIX:
+        for (mach, sval, angle), (coeffs, fname) in _temp_2d_surface[surface_name].items():
+            if angle != zero_angle:
+                continue
+            key_2d_s = (mach, sval)
+            if key_2d_s in data_2d_surface[surface_name]:
+                old_file = key_to_file_2d_surface[surface_name][key_2d_s]
+                if old_file != fname:
+                    duplicates_2d_surface.append((
+                        fname, surface_name,
+                        f"Mach={mach}, {surface_name}={sval}",
+                        old_file
+                    ))
+            data_2d_surface[surface_name][key_2d_s] = coeffs
+            key_to_file_2d_surface[surface_name][key_2d_s] = fname
 
     # Build mat_data
     mat_data = {

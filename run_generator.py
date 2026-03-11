@@ -261,7 +261,8 @@ def build_batch_script(case_names):
 AVL_EXE = "avl352.exe"
 
 # macOS dev-only binary (NEVER shipped in production)
-_AVL_MAC = "avl_mac"
+_AVL_MAC = "avl352_mac"
+_AVL_MAC_LEGACY = "avl_mac"
 
 if getattr(sys, 'frozen', False):
     _SCRIPT_DIR = os.path.dirname(sys.executable)
@@ -288,15 +289,18 @@ def find_avl_executable():
         )
 
     # --- macOS dev testing only ---
-    for candidate_dir in [_SCRIPT_DIR, os.path.join(_SCRIPT_DIR, "friend files")]:
-        path = os.path.join(candidate_dir, _AVL_MAC)
-        if os.path.isfile(path):
-            return path
+    # Prefer avl352_mac (v3.52, matches production) over avl_mac (v3.40b, legacy)
+    for binary_name in [_AVL_MAC, _AVL_MAC_LEGACY]:
+        for candidate_dir in [_SCRIPT_DIR, os.path.join(_SCRIPT_DIR, "friend files")]:
+            path = os.path.join(candidate_dir, binary_name)
+            if os.path.isfile(path):
+                return path
 
     raise FileNotFoundError(
-        f"Cannot find {_AVL_MAC} for macOS development testing.\n"
+        f"Cannot find {_AVL_MAC} (or legacy {_AVL_MAC_LEGACY}) for macOS development testing.\n"
         f"Looked in: {_SCRIPT_DIR} and friend files/\n\n"
-        f"Download avl_mac from MIT or copy it to the application directory."
+        f"Run ./build_avl352_mac.sh to build AVL 3.52 for macOS,\n"
+        f"or download avl_mac from MIT and place it in the application directory."
     )
 
 
