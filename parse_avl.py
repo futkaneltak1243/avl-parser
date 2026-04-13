@@ -498,6 +498,14 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
             if surface_val is None:
                 continue
 
+            # Skip if any OTHER surface is non-zero — this file belongs to that
+            # other surface's table. Without this, e.g. a RUDD=30 file would
+            # overwrite the AIL=0 bucket of the AIL table with RUDD-influenced
+            # derivatives, corrupting the zero-deflection row.
+            if any(run_vars.get(other) not in (None, 0.0)
+                   for other in SURFACE_SUFFIX if other != surface_name):
+                continue
+
             surface_value_sets[surface_name].add(surface_val)
 
             labels_3d = _labels_3d[surface_name]

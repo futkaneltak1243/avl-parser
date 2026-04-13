@@ -46,12 +46,17 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.2
-          name: AVL Parser v2.2
+          tag_name: v2.3
+          name: AVL Parser v2.3
           body: |
-            **AVL Parser v2.2** (commit ${{ steps.sha.outputs.short }}).
+            **AVL Parser v2.3** (commit ${{ steps.sha.outputs.short }}).
 
-            ### What's new in v2.2
+            ### What's new in v2.3
+            - **Fix (data correctness)** — 3D control-surface tables no longer contaminate the zero-deflection row. Previously, parsing a file like `M0.1A0RUDD30` would overwrite the AIL=0 and ELEV=0 buckets with RUDD-influenced derivatives; now files only contribute to the table of the surface they actually vary.
+            - **Fix** — "Add Folder" / drag-drop respects the full file limit. The limit check double-counted each file, so the effective cap was half the configured value (e.g. 500 of 1000).
+            - **Default file limit raised to 3000** (was 1000).
+
+            ### v2.2
             - **Fix** — δ,M (delta, Mach) tables now correctly use the zero-angle (α=0 or β=0) reference case instead of arbitrary angle values
             - **UI** — Export and Generate buttons are now cross-disabled during processing to prevent conflicts
 

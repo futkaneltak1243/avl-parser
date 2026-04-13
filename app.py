@@ -265,7 +265,7 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
             self._icon_ref = icon_img  # prevent garbage collection
 
         self.filepaths = []
-        self._file_limit = 1000
+        self._file_limit = 3000
 
         # Config history state (populated after UI is built)
         self._config_history = []
@@ -1377,7 +1377,7 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
             if isinstance(data, dict):
                 self._config_history = data.get("history", [])
                 self._saved_configs = data.get("saved", [])
-                self._file_limit = max(1, int(data.get("file_limit", 1000)))
+                self._file_limit = max(1, int(data.get("file_limit", 3000)))
                 load_ok = True
         except (OSError, json.JSONDecodeError, KeyError, ValueError):
             pass  # keep defaults (empty lists from __init__)
@@ -1415,7 +1415,7 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         new_names = []  # batch listbox inserts
 
         for path in paths:
-            if len(self.filepaths) + len(new_names) >= self._file_limit:
+            if len(self.filepaths) >= self._file_limit:
                 hit_limit = True
                 break
             if not os.path.isfile(path):
