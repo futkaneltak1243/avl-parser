@@ -418,6 +418,28 @@ def generate_extreme_values():
     return 'extreme_values', count
 
 
+def generate_alpha_beta():
+    """11. Beta as 3D dim (surface-like): 3 Alpha × 2 Mach × 3 Beta = 18 files.
+
+    All surfaces held at 0; Beta sweeps as a surface-like dim. Parser with
+    angle_var='Alpha' should produce Beta_CLb, Beta_CYb, ... 3D tables.
+    """
+    d = os.path.join(BASE_DIR, 'alpha_beta')
+    alphas = [-5, 0, 10]
+    machs = [0.1, 0.2]
+    betas = [-5, 0, 5]
+    count = 0
+    for alpha, mach, beta in itertools.product(alphas, machs, betas):
+        # Omit 'B0' from filename for the zero-beta case (matches run_generator)
+        name = gen_filename(mach, alpha=alpha,
+                            beta=(beta if beta != 0 else None))
+        generate_avl_file(os.path.join(d, name),
+                          alpha=alpha, beta=beta, mach=mach,
+                          flap=0, ail=0, elev=0, rudd=0)
+        count += 1
+    return 'alpha_beta', count
+
+
 def generate_partial_overlap():
     """10. Incomplete grid: only 6 of 18 possible points."""
     d = os.path.join(BASE_DIR, 'partial_overlap')
@@ -452,6 +474,7 @@ def main():
         generate_large_grid,
         generate_negative_zero,
         generate_extreme_values,
+        generate_alpha_beta,
         generate_partial_overlap,
     ]
 

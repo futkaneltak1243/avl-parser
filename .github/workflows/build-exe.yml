@@ -65,12 +65,20 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.3
-          name: AVL Parser v2.3
+          tag_name: v2.4
+          name: AVL Parser v2.4
           body: |
-            **AVL Parser v2.3** (commit ${{ steps.sha.outputs.short }}).
+            **AVL Parser v2.4** (commit ${{ steps.sha.outputs.short }}).
 
-            ### What's new in v2.3
+            ### What's new in v2.4
+            - **Beta-as-dim architecture** — Beta is now a surface-like 3D dim (joins FLAP/AIL/ELEV/RUDD), producing `Beta_CLb`, `Beta_CYb`, `Beta_CDb`, `Beta_Clb`, `Beta_Cmb`, `Beta_Cnb` arrays shaped `(alpha, mach, beta_val)`. The old 2D Beta section (`Beta_CLtot` et al.) has been removed from Full Analysis exports.
+            - **File generator** — Beta moved from the angle radio to the Surface dropdown. Each value set is now Mach × Alpha × one of {FLAP, AIL, ELEV, RUDD, Beta}. Filenames like `M0.9A-10B5` for Beta sweeps.
+            - **Fix** — Pre-export validation now catches the real invariant (Beta + any surface deflection mixed in the same file), not the obsolete "Alpha + Beta both non-zero" rule. Files like `M0.02A-2B-1` are valid beta-as-dim cases and no longer block export.
+            - **Fix** — Pre-export validation runs on a worker thread and uses a fast header-only parse (~100× faster). Clicking Export no longer freezes the window.
+            - **Fix** — "Export Blocked" dialog cleanly dismisses via OK / Esc / Return / title-bar X; no more macOS grab-leak causing the dialog to reappear.
+            - **UI** — Save dialog opens in `~` on the first export per session (avoids NSSavePanel cold-open on stale iCloud paths); subsequent exports reopen in the last-chosen folder.
+
+            ### v2.3
             - **Fix (data correctness)** — 3D control-surface tables no longer contaminate the zero-deflection row. Previously, parsing a file like `M0.1A0RUDD30` would overwrite the AIL=0 and ELEV=0 buckets with RUDD-influenced derivatives; now files only contribute to the table of the surface they actually vary.
             - **Fix** — "Add Folder" / drag-drop respects the full file limit. The limit check double-counted each file, so the effective cap was half the configured value (e.g. 500 of 1000).
             - **Default file limit raised to 3000** (was 1000).

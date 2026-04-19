@@ -34,7 +34,8 @@ def _app_dir():
 sys.path.insert(0, _app_dir())
 from parse_avl import (parse_file, FileReadError, AVLFormatError,
                        PAIRABLE_VARS, SURFACE_SUFFIX, SUFFIX_TO_SURFACE,
-                       SURFACE_COEFF_GROUPS, ALL_LABELS)
+                       SURFACE_COEFF_GROUPS, ALL_LABELS,
+                       BETA_DIM, DIMS_3D)
 from view_mat import (detect_mode, get_coefficients, detect_row_var,
                       detect_angle_var, get_2d_surface_labels,
                       classify_full_coefficients, coeff_surface)
@@ -252,7 +253,7 @@ def _plan_3d(data) -> tuple[list[Cell], list[Table]]:
     surf_2d_labels = get_2d_surface_labels(data)
     surface_vals = {
         s: data[f'{s}_values'].flatten().tolist()
-        for s in SURFACE_SUFFIX if f'{s}_values' in data
+        for s in DIMS_3D if f'{s}_values' in data
     }
 
     for label in coeffs:
@@ -261,6 +262,10 @@ def _plan_3d(data) -> tuple[list[Cell], list[Table]]:
         if surface is None or surface not in surface_vals:
             continue
         svals = surface_vals[surface]
+        # Beta_CLb lives in the mat as 'Beta_CLb' but is written in the AVL
+        # file as 'CLb' — strip the prefix for source lookup.
+        file_label = (label[len('Beta_'):]
+                      if label.startswith('Beta_') else label)
 
         if mat.ndim == 3:
             # (n_angle, n_mach, n_surface) — one sub-table per angle
@@ -280,7 +285,7 @@ def _plan_3d(data) -> tuple[list[Cell], list[Table]]:
                         if np.isnan(val):
                             continue
                         cells.append(Cell(
-                            coefficient=label, label_in_file=label,
+                            coefficient=label, label_in_file=file_label,
                             indices=(i, j, k), mat_value=val,
                             constraints={
                                 'mach': mach, angle_name: ang, surface: sv,
@@ -302,7 +307,7 @@ def _plan_3d(data) -> tuple[list[Cell], list[Table]]:
                     if np.isnan(val):
                         continue
                     cells.append(Cell(
-                        coefficient=label, label_in_file=label,
+                        coefficient=label, label_in_file=file_label,
                         indices=(k, j), mat_value=val,
                         constraints={
                             'mach': mach, surface: sv, angle_name: 0.0,
@@ -324,7 +329,7 @@ def _plan_3d(data) -> tuple[list[Cell], list[Table]]:
                     if np.isnan(val):
                         continue
                     cells.append(Cell(
-                        coefficient=label, label_in_file=label,
+                        coefficient=label, label_in_file=file_label,
                         indices=(i, j), mat_value=val,
                         constraints={'mach': mach, angle_name: ang},
                         table_id=tid,
@@ -336,7 +341,7 @@ def _plan_full(data) -> tuple[list[Cell], list[Table]]:
     cells = []
     tables = []
     coeffs = get_coefficients(data)
-    alpha_coeffs, beta_coeffs, td_coeffs = classify_full_coefficients(coeffs)
+    alpha_coeffs, beta_coeffs, td_coeffs = classify_full_coefficients(coeffs, data)
 
     # --- Alpha 2D section ---
     if 'Alpha_Mach_values' in data and 'Alpha_values' in data:
@@ -410,6 +415,11 @@ def _plan_full(data) -> tuple[list[Cell], list[Table]]:
                 continue
             svals = surface_vals[surface]
 
+            # For Beta 3D arrays the mat variable is 'Beta_CLb' but the AVL
+            # file line is 'CLb' — strip the prefix so find_source can match.
+            file_label = (label[len('Beta_'):]
+                          if label.startswith('Beta_') else label)
+
             if mat.ndim == 3:
                 for i, ang in enumerate(angle_vals):
                     tid = f"full_3d::{label}::{i}"
@@ -427,7 +437,7 @@ def _plan_full(data) -> tuple[list[Cell], list[Table]]:
                             if np.isnan(val):
                                 continue
                             cells.append(Cell(
-                                coefficient=label, label_in_file=label,
+                                coefficient=label, label_in_file=file_label,
                                 indices=(i, j, k), mat_value=val,
                                 constraints={
                                     'mach': mach, angle_var: ang,
@@ -449,7 +459,7 @@ def _plan_full(data) -> tuple[list[Cell], list[Table]]:
                         if np.isnan(val):
                             continue
                         cells.append(Cell(
-                            coefficient=label, label_in_file=label,
+                            coefficient=label, label_in_file=file_label,
                             indices=(k, j), mat_value=val,
                             constraints={
                                 'mach': mach, surface: sv, angle_var: 0.0,
@@ -470,7 +480,7 @@ def _plan_full(data) -> tuple[list[Cell], list[Table]]:
                         if np.isnan(val):
                             continue
                         cells.append(Cell(
-                            coefficient=label, label_in_file=label,
+                            coefficient=label, label_in_file=file_label,
                             indices=(i, j), mat_value=val,
                             constraints={'mach': mach, angle_var: ang},
                             table_id=tid,

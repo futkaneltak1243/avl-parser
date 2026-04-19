@@ -6,11 +6,15 @@ Used by app.py to build the generator UI inside the main window.
 
 import customtkinter as ctk
 
-from run_generator import SURFACE_NAMES
+from run_generator import DIM_CHOICES
 
 
 class ValueSetCard(ctk.CTkFrame):
-    """A single value set card: Mach × (Alpha|Beta) × (FLAP|AIL|ELEV|RUDD)."""
+    """A single value set card: Mach × Alpha × (FLAP|AIL|ELEV|RUDD|Beta).
+
+    Alpha is the only angle axis — Beta moved to the surface dropdown as a
+    surface-like 3D dim.
+    """
 
     def __init__(self, parent, card_index, on_delete, on_change):
         super().__init__(parent, corner_radius=8,
@@ -54,25 +58,12 @@ class ValueSetCard(ctk.CTkFrame):
         self.mach_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
         self.mach_entry.bind("<KeyRelease>", self._update_count)
 
-        # --- Angle row ---
+        # --- Alpha row ---
         row2 = ctk.CTkFrame(self, fg_color="transparent")
         row2.pack(fill="x", padx=10, pady=(2, 2))
 
-        ctk.CTkLabel(row2, text="Angle:",
+        ctk.CTkLabel(row2, text="Alpha values:",
                      font=ctk.CTkFont(size=11)).pack(side="left")
-
-        self.angle_var = ctk.StringVar(value="Alpha")
-        ctk.CTkRadioButton(row2, text="Alpha", variable=self.angle_var,
-                           value="Alpha", font=ctk.CTkFont(size=11),
-                           command=self._update_count
-                           ).pack(side="left", padx=(6, 0))
-        ctk.CTkRadioButton(row2, text="Beta", variable=self.angle_var,
-                           value="Beta", font=ctk.CTkFont(size=11),
-                           command=self._update_count
-                           ).pack(side="left", padx=(6, 0))
-
-        ctk.CTkLabel(row2, text="Values:",
-                     font=ctk.CTkFont(size=11)).pack(side="left", padx=(12, 0))
         self.angle_entry = ctk.CTkEntry(row2, placeholder_text="-4, -2, 0, 2, 4",
                                         font=ctk.CTkFont(size=11))
         self.angle_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
@@ -87,7 +78,7 @@ class ValueSetCard(ctk.CTkFrame):
 
         self.surface_var = ctk.StringVar(value="FLAP")
         self.surface_menu = ctk.CTkOptionMenu(
-            row3, values=SURFACE_NAMES, variable=self.surface_var,
+            row3, values=DIM_CHOICES, variable=self.surface_var,
             width=90, height=26, font=ctk.CTkFont(size=11),
             command=lambda _: self._update_count())
         self.surface_menu.pack(side="left", padx=(6, 0))
@@ -145,7 +136,7 @@ class ValueSetCard(ctk.CTkFrame):
         """
         fields = [
             ("Mach", self.mach_entry.get()),
-            (self.angle_var.get(), self.angle_entry.get()),
+            ("Alpha", self.angle_entry.get()),
             (self.surface_var.get(), self.surface_entry.get()),
         ]
         for field_name, text in fields:
@@ -189,7 +180,7 @@ class ValueSetCard(ctk.CTkFrame):
 
         return {
             "mach_values": mach,
-            "angle_type": self.angle_var.get(),
+            "angle_type": "Alpha",
             "angle_values": angle,
             "surface_type": self.surface_var.get(),
             "surface_values": surface,

@@ -106,6 +106,17 @@ SURFACE_COEFF_GROUPS = {}
 for _surface, _suffix in SURFACE_SUFFIX.items():
     SURFACE_COEFF_GROUPS[_surface] = [l for l in STANDARD_LABELS if _suffix in l]
 
+# Beta, when swept in 3D mode, is a virtual "surface-like" dimension:
+# each Beta value produces its own (alpha, mach) slice stored as a 3D array.
+# Beta's coefficient group is the 6 stability derivatives w.r.t. beta.
+BETA_DIM = 'Beta'
+BETA_COEFFS = ['CLb', 'CYb', 'CDb', 'Clb', 'Cmb', 'Cnb']
+
+# Unified 3D dimensions: physical control surfaces + Beta as virtual dim.
+DIMS_3D = list(SURFACE_SUFFIX.keys()) + [BETA_DIM]
+DIM_COEFF_GROUPS = dict(SURFACE_COEFF_GROUPS)
+DIM_COEFF_GROUPS[BETA_DIM] = BETA_COEFFS
+
 
 # --- Exceptions ---
 
@@ -208,6 +219,33 @@ def mach_to_varname(mach):
 
 
 # --- Processing ---
+
+def parse_run_vars(filepath):
+    """Fast parse: read only the first 2 KB and extract the run variables.
+
+    Returns (mach, run_vars) where run_vars is a dict of {var_name: float|None}
+    for all PAIRABLE_VARS. Coefficients are NOT extracted — use parse_file()
+    for that. ~100× faster than parse_file() for pre-export validation.
+
+    Returns (None, None) if the file can't be read or isn't an AVL output.
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='strict') as f:
+            text = f.read(2048)
+    except (OSError, UnicodeDecodeError):
+        return None, None
+    if 'Vortex Lattice Output' not in text:
+        return None, None
+    m = _RE_MACH.search(text)
+    if not m:
+        return None, None
+    mach = float(m.group(1))
+    run_vars = {}
+    for var_name, compiled in _RE_PAIRABLE.items():
+        m = compiled.search(text)
+        run_vars[var_name] = float(m.group(1)) if m else None
+    return mach, run_vars
+
 
 def validate_file(filepath):
     """Quick-validate a single file without full coefficient parsing.
@@ -426,10 +464,12 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
     if coeff_modes is None:
         coeff_modes = {}
 
-    # All 32 control surface labels
-    all_surface_labels = []
-    for surface in SURFACE_SUFFIX:
-        all_surface_labels.extend(SURFACE_COEFF_GROUPS[surface])
+    # Active 3D dims: surfaces always, plus Beta unless it's already the axis.
+    # (Beta-as-axis and Beta-as-dim are mutually exclusive by construction.)
+    if angle_var == BETA_DIM:
+        _active_dims = list(SURFACE_SUFFIX.keys())
+    else:
+        _active_dims = list(DIMS_3D)
 
     skipped = []
     duplicates_3d = []
@@ -437,31 +477,31 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
     duplicates_2d_surface = []
     file_warnings = {}
 
-    # Data storage: keyed by surface
-    data_3d = {s: {} for s in SURFACE_SUFFIX}           # (mach, angle, surface_val)
-    data_2d_angle = {s: {} for s in SURFACE_SUFFIX}      # (mach, angle)
-    data_2d_surface = {s: {} for s in SURFACE_SUFFIX}    # (mach, surface_val)
+    # Data storage: keyed by dim (surface name or 'Beta')
+    data_3d = {d: {} for d in _active_dims}           # (mach, angle, dim_val)
+    data_2d_angle = {d: {} for d in _active_dims}      # (mach, angle)
+    data_2d_surface = {d: {} for d in _active_dims}    # (mach, dim_val)
     # Temp storage for 2D-surface: collect all angles, then keep only zero-angle
-    _temp_2d_surface = {s: {} for s in SURFACE_SUFFIX}  # (mach, surface_val, angle)
+    _temp_2d_surface = {d: {} for d in _active_dims}  # (mach, dim_val, angle)
     # Track which file produced each key for duplicate reporting
-    key_to_file_3d = {s: {} for s in SURFACE_SUFFIX}
-    key_to_file_2d_angle = {s: {} for s in SURFACE_SUFFIX}
-    key_to_file_2d_surface = {s: {} for s in SURFACE_SUFFIX}
+    key_to_file_3d = {d: {} for d in _active_dims}
+    key_to_file_2d_angle = {d: {} for d in _active_dims}
+    key_to_file_2d_surface = {d: {} for d in _active_dims}
 
     mach_set = set()
     angle_set = set()
-    surface_value_sets = {s: set() for s in SURFACE_SUFFIX}
+    dim_value_sets = {d: set() for d in _active_dims}
 
-    # Pre-compute label groups per surface (coeff_modes is constant)
+    # Pre-compute label groups per dim (coeff_modes is constant)
     _labels_3d = {}
     _labels_2d_angle = {}
     _labels_2d_surface = {}
-    for sname in SURFACE_SUFFIX:
-        sl = SURFACE_COEFF_GROUPS[sname]
-        _labels_3d[sname] = [l for l in sl if coeff_modes.get(l) == '3d']
-        _labels_2d_angle[sname] = [l for l in sl
+    for dname in _active_dims:
+        dl = DIM_COEFF_GROUPS[dname]
+        _labels_3d[dname] = [l for l in dl if coeff_modes.get(l) == '3d']
+        _labels_2d_angle[dname] = [l for l in dl
                                    if coeff_modes.get(l, '2d_angle') == '2d_angle']
-        _labels_2d_surface[sname] = [l for l in sl
+        _labels_2d_surface[dname] = [l for l in dl
                                      if coeff_modes.get(l) == '2d_surface']
 
     parsed_count = 0
@@ -477,7 +517,8 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
             skipped.append((filename, str(e)))
             continue
 
-        # Need at least one surface value
+        # Need at least one surface value (Beta alone is never sufficient —
+        # files without any control-surface columns are not valid 3D inputs).
         has_surface = any(run_vars.get(s) is not None for s in SURFACE_SUFFIX)
         if not has_surface:
             skipped.append((filename, "no control surface values found"))
@@ -493,56 +534,59 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
 
         parsed_count += 1
 
-        for surface_name in SURFACE_SUFFIX:
-            surface_val = run_vars.get(surface_name)
-            if surface_val is None:
+        for dim_name in _active_dims:
+            dim_val = run_vars.get(dim_name)
+            if dim_val is None:
                 continue
 
-            # Skip if any OTHER surface is non-zero — this file belongs to that
-            # other surface's table. Without this, e.g. a RUDD=30 file would
-            # overwrite the AIL=0 bucket of the AIL table with RUDD-influenced
-            # derivatives, corrupting the zero-deflection row.
+            # Skip if any OTHER 3D dim is non-zero — this file belongs to that
+            # other dim's table. Without this, e.g. a RUDD=30 file would
+            # overwrite the AIL=0 bucket of the AIL table, and a Beta=5 file
+            # would contaminate every surface's zero-beta row.
+            # The current dim and the angle-axis variable are excluded, since
+            # both are expected to vary across files.
             if any(run_vars.get(other) not in (None, 0.0)
-                   for other in SURFACE_SUFFIX if other != surface_name):
+                   for other in DIMS_3D
+                   if other != dim_name and other != angle_var):
                 continue
 
-            surface_value_sets[surface_name].add(surface_val)
+            dim_value_sets[dim_name].add(dim_val)
 
-            labels_3d = _labels_3d[surface_name]
-            labels_2d_angle = _labels_2d_angle[surface_name]
-            labels_2d_surface = _labels_2d_surface[surface_name]
+            labels_3d = _labels_3d[dim_name]
+            labels_2d_angle = _labels_2d_angle[dim_name]
+            labels_2d_surface = _labels_2d_surface[dim_name]
 
             # 3D data: needs angle_val
             if angle_val is not None and labels_3d:
-                key_3d = (mach, angle_val, surface_val)
-                if key_3d in data_3d[surface_name]:
-                    old_file = key_to_file_3d[surface_name][key_3d]
+                key_3d = (mach, angle_val, dim_val)
+                if key_3d in data_3d[dim_name]:
+                    old_file = key_to_file_3d[dim_name][key_3d]
                     duplicates_3d.append((
-                        filename, surface_name,
-                        f"Mach={mach}, {angle_var}={angle_val}, {surface_name}={surface_val}",
+                        filename, dim_name,
+                        f"Mach={mach}, {angle_var}={angle_val}, {dim_name}={dim_val}",
                         old_file
                     ))
-                data_3d[surface_name][key_3d] = coefficients
-                key_to_file_3d[surface_name][key_3d] = filename
+                data_3d[dim_name][key_3d] = coefficients
+                key_to_file_3d[dim_name][key_3d] = filename
 
             # 2D-angle data: keyed by (mach, angle_val)
             if labels_2d_angle and angle_val is not None:
                 key_2d = (mach, angle_val)
-                if key_2d in data_2d_angle[surface_name]:
-                    old_file = key_to_file_2d_angle[surface_name][key_2d]
+                if key_2d in data_2d_angle[dim_name]:
+                    old_file = key_to_file_2d_angle[dim_name][key_2d]
                     if old_file != filename:
                         duplicates_2d_angle.append((
-                            filename, surface_name,
+                            filename, dim_name,
                             f"Mach={mach}, {angle_var}={angle_val}",
                             old_file
                         ))
-                data_2d_angle[surface_name][key_2d] = coefficients
-                key_to_file_2d_angle[surface_name][key_2d] = filename
+                data_2d_angle[dim_name][key_2d] = coefficients
+                key_to_file_2d_angle[dim_name][key_2d] = filename
 
             # 2D-surface data: collect with angle, filter to zero-angle after loop
             if labels_2d_surface and angle_val is not None:
-                key_temp = (mach, surface_val, angle_val)
-                _temp_2d_surface[surface_name][key_temp] = (coefficients, filename)
+                key_temp = (mach, dim_val, angle_val)
+                _temp_2d_surface[dim_name][key_temp] = (coefficients, filename)
 
     if parsed_count == 0:
         if skipped:
@@ -556,21 +600,21 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
 
     # Build data_2d_surface from zero-angle entries only
     zero_angle = min(angle_set, key=lambda a: abs(a)) if angle_set else 0.0
-    for surface_name in SURFACE_SUFFIX:
-        for (mach, sval, angle), (coeffs, fname) in _temp_2d_surface[surface_name].items():
+    for dim_name in _active_dims:
+        for (mach, dval, angle), (coeffs, fname) in _temp_2d_surface[dim_name].items():
             if angle != zero_angle:
                 continue
-            key_2d_s = (mach, sval)
-            if key_2d_s in data_2d_surface[surface_name]:
-                old_file = key_to_file_2d_surface[surface_name][key_2d_s]
+            key_2d_s = (mach, dval)
+            if key_2d_s in data_2d_surface[dim_name]:
+                old_file = key_to_file_2d_surface[dim_name][key_2d_s]
                 if old_file != fname:
                     duplicates_2d_surface.append((
-                        fname, surface_name,
-                        f"Mach={mach}, {surface_name}={sval}",
+                        fname, dim_name,
+                        f"Mach={mach}, {dim_name}={dval}",
                         old_file
                     ))
-            data_2d_surface[surface_name][key_2d_s] = coeffs
-            key_to_file_2d_surface[surface_name][key_2d_s] = fname
+            data_2d_surface[dim_name][key_2d_s] = coeffs
+            key_to_file_2d_surface[dim_name][key_2d_s] = fname
 
     # Build mat_data
     mat_data = {
@@ -580,51 +624,56 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
     if angle_vals:
         mat_data[f'{angle_var}_values'] = np.array(angle_vals, dtype=float)
 
-    surface_values_sorted = {}
-    for surface_name in SURFACE_SUFFIX:
-        vals = sorted(surface_value_sets[surface_name])
+    dim_values_sorted = {}
+    for dim_name in _active_dims:
+        vals = sorted(dim_value_sets[dim_name])
         if vals:
-            surface_values_sorted[surface_name] = vals
-            mat_data[f'{surface_name}_values'] = np.array(vals, dtype=float)
+            dim_values_sorted[dim_name] = vals
+            mat_data[f'{dim_name}_values'] = np.array(vals, dtype=float)
 
     n_3d = 0
     n_2d_angle = 0
     n_2d_surface = 0
     labels_2d_surface_list = []
 
-    for surface_name in SURFACE_SUFFIX:
-        surf_vals = surface_values_sorted.get(surface_name, [])
-        if not surf_vals:
+    for dim_name in _active_dims:
+        dim_vals = dim_values_sorted.get(dim_name, [])
+        if not dim_vals:
             continue
 
-        for label in SURFACE_COEFF_GROUPS[surface_name]:
+        # Beta coefficients get a 'Beta_' output prefix; surface coefficients
+        # are already uniquely named by their d0N suffix.
+        out_prefix = 'Beta_' if dim_name == BETA_DIM else ''
+
+        for label in DIM_COEFF_GROUPS[dim_name]:
             mode = coeff_modes.get(label, '2d_angle')
+            out_label = f'{out_prefix}{label}'
 
             if mode == '3d':
-                # 3D matrix: (n_angle, n_mach, n_surface_val)
+                # 3D matrix: (n_angle, n_mach, n_dim_val)
                 if not angle_vals:
                     continue
-                matrix = np.full((len(angle_vals), len(machs), len(surf_vals)), np.nan)
+                matrix = np.full((len(angle_vals), len(machs), len(dim_vals)), np.nan)
                 for i, angle in enumerate(angle_vals):
                     for j, mach in enumerate(machs):
-                        for k, sval in enumerate(surf_vals):
-                            entry = data_3d[surface_name].get((mach, angle, sval))
+                        for k, dval in enumerate(dim_vals):
+                            entry = data_3d[dim_name].get((mach, angle, dval))
                             if entry and entry.get(label) is not None:
                                 matrix[i, j, k] = entry[label]
-                mat_data[label] = matrix
+                mat_data[out_label] = matrix
                 n_3d += 1
 
             elif mode == '2d_surface':
-                # 2D matrix: (n_surface_val, n_mach)
-                matrix = np.full((len(surf_vals), len(machs)), np.nan)
-                for k, sval in enumerate(surf_vals):
+                # 2D matrix: (n_dim_val, n_mach)
+                matrix = np.full((len(dim_vals), len(machs)), np.nan)
+                for k, dval in enumerate(dim_vals):
                     for j, mach in enumerate(machs):
-                        entry = data_2d_surface[surface_name].get((mach, sval))
+                        entry = data_2d_surface[dim_name].get((mach, dval))
                         if entry and entry.get(label) is not None:
                             matrix[k, j] = entry[label]
-                mat_data[label] = matrix
+                mat_data[out_label] = matrix
                 n_2d_surface += 1
-                labels_2d_surface_list.append(label)
+                labels_2d_surface_list.append(out_label)
 
             else:
                 # 2D matrix: (n_angle, n_mach)
@@ -633,10 +682,10 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
                 matrix = np.full((len(angle_vals), len(machs)), np.nan)
                 for i, angle in enumerate(angle_vals):
                     for j, mach in enumerate(machs):
-                        entry = data_2d_angle[surface_name].get((mach, angle))
+                        entry = data_2d_angle[dim_name].get((mach, angle))
                         if entry and entry.get(label) is not None:
                             matrix[i, j] = entry[label]
-                mat_data[label] = matrix
+                mat_data[out_label] = matrix
                 n_2d_angle += 1
 
     # Store metadata for view_mat.py to distinguish 2D types
@@ -644,12 +693,12 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
         mat_data['x_2d_surface_labels'] = np.array(labels_2d_surface_list, dtype=object)
 
     all_duplicates = []
-    for name, surface, desc, old in duplicates_3d:
-        all_duplicates.append((name, f"3D {surface}: {desc} (overwrote {old})"))
-    for name, surface, desc, old in duplicates_2d_angle:
-        all_duplicates.append((name, f"2D-angle {surface}: {desc} (overwrote {old})"))
-    for name, surface, desc, old in duplicates_2d_surface:
-        all_duplicates.append((name, f"2D-surface {surface}: {desc} (overwrote {old})"))
+    for name, dim, desc, old in duplicates_3d:
+        all_duplicates.append((name, f"3D {dim}: {desc} (overwrote {old})"))
+    for name, dim, desc, old in duplicates_2d_angle:
+        all_duplicates.append((name, f"2D-angle {dim}: {desc} (overwrote {old})"))
+    for name, dim, desc, old in duplicates_2d_surface:
+        all_duplicates.append((name, f"2D-surface {dim}: {desc} (overwrote {old})"))
 
     stats = {
         'parsed': parsed_count,
@@ -659,7 +708,7 @@ def process_files_3d(filepaths, angle_var='Alpha', coeff_modes=None,
         'machs': machs,
         'angle_var': angle_var,
         'angle_values': angle_vals,
-        'surface_values': surface_values_sorted,
+        'surface_values': dim_values_sorted,
         'n_3d': n_3d,
         'n_2d_angle': n_2d_angle,
         'n_2d_surface': n_2d_surface,
@@ -677,29 +726,29 @@ NON_CS_LABELS = [l for l in ALL_LABELS if not any(s in l for s in _CS_SUFFIXES)]
 
 def process_files_full(filepaths, angle_var='Alpha', coeff_modes=None,
                         progress_cb=None, skip_conflicts=True):
-    """Combined export: 2D tables for Alpha & Beta + 3D tables for control surfaces.
+    """Combined export: 2D tables for the angle axis + 3D tables for surfaces + Beta.
 
-    Non-CS coefficients come from 2D processing (Alpha×Mach and Beta×Mach).
-    CS coefficients come from 3D processing.
+    Non-CS coefficients come from 2D processing (angle_var × Mach).
+    CS coefficients come from 3D processing. Beta participates in the 3D
+    section as a virtual surface-like dim, producing 'Beta_<coef>' arrays.
 
     Args:
         filepaths: list of file paths to parse.
-        angle_var: 'Alpha' or 'Beta' — the angle axis for the 3D section.
+        angle_var: 'Alpha' or 'Beta' — the angle axis for 2D and 3D sections.
         coeff_modes: dict {label: mode} for 3D coefficient modes.
         progress_cb: optional callback(step, total) called after each pass.
 
     Returns:
         (mat_data, full_stats) where mat_data is ready for scipy.io.savemat().
     Raises:
-        ValueError if all three processing calls fail.
+        ValueError if both processing calls fail.
     """
     mat_data = {}
     alpha_stats = None
-    beta_stats = None
     td_stats = None
     errors = []
 
-    # --- Alpha 2D section ---
+    # --- Alpha 2D section (always alpha×mach, regardless of angle_var) ---
     try:
         alpha_data, alpha_stats = process_files(filepaths, second_var='Alpha',
                                                      skip_conflicts=skip_conflicts)
@@ -714,24 +763,9 @@ def process_files_full(filepaths, angle_var='Alpha', coeff_modes=None,
         errors.append(f"Alpha 2D: {e}")
 
     if progress_cb:
-        progress_cb(1, 3)
+        progress_cb(1, 2)
 
-    # --- Beta 2D section ---
-    try:
-        beta_data, beta_stats = process_files(filepaths, second_var='Beta',
-                                                    skip_conflicts=skip_conflicts)
-        mat_data['Beta_values'] = beta_data.pop('Beta_values')
-        mat_data['Beta_Mach_values'] = beta_data.pop('Mach_values')
-        for label in NON_CS_LABELS:
-            if label in beta_data:
-                mat_data[f'Beta_{label}'] = beta_data[label]
-    except ValueError as e:
-        errors.append(f"Beta 2D: {e}")
-
-    if progress_cb:
-        progress_cb(2, 3)
-
-    # --- 3D section ---
+    # --- 3D section (surfaces + Beta-as-dim) ---
     try:
         td_data, td_stats = process_files_3d(
             filepaths, angle_var=angle_var, coeff_modes=coeff_modes
@@ -742,19 +776,19 @@ def process_files_full(filepaths, angle_var='Alpha', coeff_modes=None,
         if angle_key in td_data:
             mat_data['Angle_values'] = td_data.pop(angle_key)
         mat_data['Angle_var'] = np.array([angle_var])
-        # Surface value arrays
-        for surface in SURFACE_SUFFIX:
-            key = f'{surface}_values'
+        # Dim value arrays (surfaces + Beta)
+        for dim in DIMS_3D:
+            key = f'{dim}_values'
             if key in td_data:
                 mat_data[key] = td_data.pop(key)
-        # CS coefficients
+        # CS + Beta_ coefficients
         for key, val in td_data.items():
             mat_data[key] = val
     except ValueError as e:
         errors.append(f"3D: {e}")
 
     if progress_cb:
-        progress_cb(3, 3)
+        progress_cb(2, 2)
 
     if not mat_data:
         raise ValueError(
@@ -763,15 +797,14 @@ def process_files_full(filepaths, angle_var='Alpha', coeff_modes=None,
 
     # Count labels per section
     n_alpha = sum(1 for l in NON_CS_LABELS if l in mat_data) if alpha_stats else 0
-    n_beta = sum(1 for l in NON_CS_LABELS if f'Beta_{l}' in mat_data) if beta_stats else 0
     n_td = (td_stats['n_labels'] if td_stats else 0)
 
     full_stats = {
         'alpha_stats': alpha_stats,
-        'beta_stats': beta_stats,
+        'beta_stats': None,  # 2D Beta section removed; beta now lives in 3D
         'td_stats': td_stats,
         'n_alpha_labels': n_alpha,
-        'n_beta_labels': n_beta,
+        'n_beta_labels': 0,
         'n_td_labels': n_td,
         'errors': errors,
     }

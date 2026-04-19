@@ -16,7 +16,7 @@ import numpy as np
 from scipy.io import loadmat
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from parse_avl import SURFACE_SUFFIX, SUFFIX_TO_SURFACE
+from parse_avl import SURFACE_SUFFIX, SUFFIX_TO_SURFACE, BETA_DIM, DIMS_3D
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
 MAT_PATH = os.path.join(OUTPUT_DIR, 'avl_data.mat')
@@ -92,15 +92,25 @@ def detect_angle_var(data):
 
 
 def coeff_surface(label):
-    """Return the surface name a coefficient belongs to, or None."""
+    """Return the surface name a coefficient belongs to, or None.
+
+    Also returns 'Beta' for the new 3D Beta_-prefixed coefficients (they are
+    treated as a virtual surface dim in the 3D architecture).
+    """
+    if label.startswith('Beta_'):
+        return BETA_DIM
     for suffix, surface in SUFFIX_TO_SURFACE.items():
         if suffix in label:
             return surface
     return None
 
 
-def classify_full_coefficients(coeffs):
+def classify_full_coefficients(coeffs, data=None):
     """Classify coefficients into Alpha 2D, Beta 2D, and 3D sections.
+
+    3D Beta_-prefixed arrays (new Beta-as-dim outputs) belong in td_coeffs.
+    Legacy 2D Beta_-prefixed arrays (if present in old .mat files) go to
+    beta_coeffs. Classification uses ndim when `data` is supplied.
 
     Returns:
         (alpha_coeffs, beta_coeffs, td_coeffs) — three sorted lists.
@@ -111,7 +121,11 @@ def classify_full_coefficients(coeffs):
 
     for label in coeffs:
         if label.startswith('Beta_'):
-            beta_coeffs.append(label)
+            is_3d = data is not None and data[label].ndim == 3
+            if is_3d:
+                td_coeffs.append(label)
+            else:
+                beta_coeffs.append(label)
         elif coeff_surface(label) is not None:
             td_coeffs.append(label)
         else:
@@ -261,7 +275,7 @@ def print_summary(data, mat_path):
     print('  ' + '=' * 50)
 
     if mode == 'full':
-        alpha_coeffs, beta_coeffs, td_coeffs = classify_full_coefficients(coeffs)
+        alpha_coeffs, beta_coeffs, td_coeffs = classify_full_coefficients(coeffs, data)
 
         if 'Alpha_Mach_values' in data:
             alpha_machs = data['Alpha_Mach_values'].flatten()
@@ -293,7 +307,7 @@ def print_summary(data, mat_path):
             n_2d_surface = sum(1 for l in td_coeffs if data[l].ndim == 2 and l in surface_2d)
             n_2d_angle = sum(1 for l in td_coeffs if data[l].ndim == 2 and l not in surface_2d)
 
-            for surface_name in SURFACE_SUFFIX:
+            for surface_name in DIMS_3D:
                 key = f'{surface_name}_values'
                 if key in data:
                     svals = data[key].flatten()
@@ -316,7 +330,7 @@ def print_summary(data, mat_path):
         n_2d_surface = sum(1 for l in coeffs if data[l].ndim == 2 and l in surface_2d)
         n_2d_angle = sum(1 for l in coeffs if data[l].ndim == 2 and l not in surface_2d)
 
-        for surface_name in SURFACE_SUFFIX:
+        for surface_name in DIMS_3D:
             key = f'{surface_name}_values'
             if key in data:
                 svals = data[key].flatten()
@@ -347,7 +361,7 @@ def print_list(data):
     print('  ' + '-' * 50)
 
     if mode == 'full':
-        alpha_coeffs, beta_coeffs, td_coeffs = classify_full_coefficients(coeffs)
+        alpha_coeffs, beta_coeffs, td_coeffs = classify_full_coefficients(coeffs, data)
 
         if alpha_coeffs:
             print(f'  Alpha 2D ({len(alpha_coeffs)}):')
@@ -489,7 +503,7 @@ def main():
 
 def _write_tables_full(data, coeffs, output_path):
     """Write Full Analysis tables (Alpha 2D + Beta 2D + 3D) to terminal and file."""
-    alpha_coeffs, beta_coeffs, td_coeffs = classify_full_coefficients(coeffs)
+    alpha_coeffs, beta_coeffs, td_coeffs = classify_full_coefficients(coeffs, data)
 
     alpha_vals = data['Alpha_values'].flatten() if 'Alpha_values' in data else np.array([])
     beta_vals = data['Beta_values'].flatten() if 'Beta_values' in data else np.array([])
@@ -500,7 +514,7 @@ def _write_tables_full(data, coeffs, output_path):
     surface_2d_labels = get_2d_surface_labels(data)
 
     surface_vals = {}
-    for surface_name in SURFACE_SUFFIX:
+    for surface_name in DIMS_3D:
         key = f'{surface_name}_values'
         if key in data:
             surface_vals[surface_name] = data[key].flatten()
@@ -508,7 +522,7 @@ def _write_tables_full(data, coeffs, output_path):
 
     # Group 3D-section coefficients by type and surface
     grouped_3d = {}
-    for surface_name in SURFACE_SUFFIX:
+    for surface_name in DIMS_3D:
         if surface_name not in active_surfaces:
             continue
         labels = [l for l in td_coeffs
@@ -520,7 +534,7 @@ def _write_tables_full(data, coeffs, output_path):
                    if data[l].ndim == 2 and l not in surface_2d_labels]
 
     grouped_2d_surface = {}
-    for surface_name in SURFACE_SUFFIX:
+    for surface_name in DIMS_3D:
         if surface_name not in active_surfaces:
             continue
         labels = [l for l in td_coeffs
@@ -625,7 +639,7 @@ def _write_tables_full(data, coeffs, output_path):
             f.write(f'  Mach values:   {td_machs}\n')
             if len(angle_vals) > 0:
                 f.write(f'  {angle_var} values: {angle_vals}\n')
-            for sname in SURFACE_SUFFIX:
+            for sname in DIMS_3D:
                 if sname in active_surfaces:
                     f.write(f'  {sname} values: {surface_vals[sname]}\n')
             f.write(f'  Coefficients:  {len(td_coeffs)} '
@@ -686,7 +700,7 @@ def _write_tables(data, coeffs, mode, machs, output_path):
         surface_2d_labels = get_2d_surface_labels(data)
 
         surface_vals = {}
-        for surface_name in SURFACE_SUFFIX:
+        for surface_name in DIMS_3D:
             key = f'{surface_name}_values'
             if key in data:
                 surface_vals[surface_name] = data[key].flatten()
@@ -695,7 +709,7 @@ def _write_tables(data, coeffs, mode, machs, output_path):
 
         # Group coefficients into three categories
         grouped_3d = {}
-        for surface_name in SURFACE_SUFFIX:
+        for surface_name in DIMS_3D:
             if surface_name not in active_surfaces:
                 continue
             labels = [l for l in coeffs if coeff_surface(l) == surface_name and data[l].ndim == 3]
@@ -706,7 +720,7 @@ def _write_tables(data, coeffs, mode, machs, output_path):
                            if data[l].ndim == 2 and l not in surface_2d_labels]
         # Group 2D-surface coefficients by their surface
         grouped_2d_surface = {}
-        for surface_name in SURFACE_SUFFIX:
+        for surface_name in DIMS_3D:
             if surface_name not in active_surfaces:
                 continue
             labels = [l for l in coeffs

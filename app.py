@@ -47,8 +47,10 @@ def _app_dir():
 # Ensure imports work when running from any directory
 sys.path.insert(0, _app_dir())
 from parse_avl import (process_files, process_files_3d, process_files_full,
-                        parse_file, validate_file, ALL_LABELS, PAIRABLE_VARS,
-                        SURFACE_SUFFIX, SURFACE_COEFF_GROUPS)
+                        parse_file, parse_run_vars, validate_file,
+                        ALL_LABELS, PAIRABLE_VARS,
+                        SURFACE_SUFFIX, SURFACE_COEFF_GROUPS,
+                        BETA_DIM, BETA_COEFFS, DIMS_3D, DIM_COEFF_GROUPS)
 
 from run_generator import FIXED_PARAMS, SURFACE_NAMES, find_avl_executable, run_avl
 from run_generator_ui import ValueSetCard
@@ -118,6 +120,7 @@ _MODE_DECODE = {v: k for k, v in _MODE_ENCODE.items()}
 _COEFF_ORDER = []
 for _s in SURFACE_SUFFIX:
     _COEFF_ORDER.extend(SURFACE_COEFF_GROUPS[_s])
+_COEFF_ORDER.extend(BETA_COEFFS)
 
 
 class _LoadConfigDialog(ctk.CTkToplevel):
@@ -266,6 +269,7 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
         self.filepaths = []
         self._file_limit = 3000
+        self._last_save_dir = None  # remembers user's last chosen save location
 
         # Config history state (populated after UI is built)
         self._config_history = []
@@ -541,7 +545,7 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
         _chk_font = ctk.CTkFont(size=11)
         self.chk_angle = ctk.CTkCheckBox(
-            self.validation_frame, text="Single angle",
+            self.validation_frame, text="No \u03b2+surface mix",
             variable=self.check_single_angle,
             font=_chk_font, checkbox_width=16, checkbox_height=16)
         self.chk_angle.pack(side="left", padx=(0, 10))
@@ -1040,7 +1044,7 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
         # Validation checkboxes
         Tooltip(self.chk_2d, "Skip files with multiple non-zero angles or deflections")
-        Tooltip(self.chk_angle, "Block export if any file has both Alpha and Beta non-zero")
+        Tooltip(self.chk_angle, "Block export if any file mixes non-zero Beta with a non-zero control surface deflection")
         Tooltip(self.chk_defl, "Block export if any file has multiple control surfaces non-zero")
         Tooltip(self.chk_fa_skip, "Skip conflicting files in Alpha and Beta 2D passes")
 
@@ -1085,18 +1089,20 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         self.coeff_mode_vars = {}   # {label: StringVar}
 
         surfaces = list(SURFACE_SUFFIX.keys())
-        surface_colors = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444"]
+        dims = surfaces + [BETA_DIM]  # physical surfaces + Beta as virtual dim
+        dim_colors = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#A855F7"]
+        n_cols = len(dims)  # 5
 
-        # Configure grid columns: label + 4 surface columns
+        # Configure grid columns: label + n_cols dim columns
         coeff_grid.columnconfigure(0, weight=0, minsize=52)
-        for i in range(1, 5):
+        for i in range(1, n_cols + 1):
             coeff_grid.columnconfigure(i, weight=1)
 
-        # Row 0: Surface headers
-        for col_idx, surface in enumerate(surfaces):
-            ctk.CTkLabel(coeff_grid, text=surface,
+        # Row 0: Dim headers (surfaces + Beta)
+        for col_idx, dim in enumerate(dims):
+            ctk.CTkLabel(coeff_grid, text=dim,
                           font=ctk.CTkFont(size=11, weight="bold"),
-                          text_color=surface_colors[col_idx]
+                          text_color=dim_colors[col_idx]
             ).grid(row=0, column=col_idx + 1, padx=2, pady=(6, 2))
 
         # Row 1: "Set all" buttons
@@ -1106,22 +1112,25 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
                       anchor="w"
         ).grid(row=1, column=0, padx=(8, 2), pady=2, sticky="w")
 
-        for col_idx, surface in enumerate(surfaces):
+        for col_idx, dim in enumerate(dims):
             group_var = ctk.StringVar(value=MODE_LABELS[0])
             ctk.CTkSegmentedButton(
                 coeff_grid, values=MODE_LABELS, variable=group_var,
                 font=ctk.CTkFont(size=9), height=22,
-                command=lambda val, s=surface: self._set_group(s, val),
+                command=lambda val, s=dim: self._set_group(s, val),
             ).grid(row=1, column=col_idx + 1, padx=2, pady=2, sticky="ew")
 
         # Row 2: Separator
         ctk.CTkFrame(coeff_grid, height=1,
                        fg_color=("gray80", "gray30")
-        ).grid(row=2, column=0, columnspan=5, sticky="ew", padx=4, pady=2)
+        ).grid(row=2, column=0, columnspan=n_cols + 1, sticky="ew", padx=4, pady=2)
 
-        # Rows 3-10: Coefficient rows (8 per surface)
+        # Rows 3-10: Coefficient rows. Surfaces have 8 derivatives each; Beta
+        # only has 6 (CLb…Cnb — no CDffb or eb exist in AVL output). For the
+        # last 2 rows (CDff, e), the Beta column is left blank.
         num_coeffs = len(SURFACE_COEFF_GROUPS[surfaces[0]])
         first_suffix = SURFACE_SUFFIX[surfaces[0]]
+        _beta_coeff_set = set(BETA_COEFFS)
 
         for row_idx in range(num_coeffs):
             grid_row = row_idx + 3
@@ -1133,8 +1142,15 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
                           anchor="w"
             ).grid(row=grid_row, column=0, padx=(8, 2), pady=1, sticky="w")
 
-            for col_idx, surface in enumerate(surfaces):
-                label = SURFACE_COEFF_GROUPS[surface][row_idx]
+            for col_idx, dim in enumerate(dims):
+                if dim == BETA_DIM:
+                    beta_label = f"{base_name}b"
+                    if beta_label not in _beta_coeff_set:
+                        continue  # Beta has no coeff for this row (CDff, e)
+                    label = beta_label
+                else:
+                    label = SURFACE_COEFF_GROUPS[dim][row_idx]
+
                 var = ctk.StringVar(value=MODE_LABELS[0])
                 ctk.CTkSegmentedButton(
                     coeff_grid, values=MODE_LABELS, variable=var,
@@ -1181,10 +1197,11 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
         self.config_toolbar.pack(fill="x", pady=(0, 4))
 
-    def _set_group(self, surface, mode):
-        """Set all coefficients in a surface group to the chosen mode."""
-        for label in SURFACE_COEFF_GROUPS[surface]:
-            self.coeff_mode_vars[label].set(mode)
+    def _set_group(self, dim, mode):
+        """Set all coefficients in a dim group (surface or Beta) to the chosen mode."""
+        for label in DIM_COEFF_GROUPS[dim]:
+            if label in self.coeff_mode_vars:
+                self.coeff_mode_vars[label].set(mode)
 
     def _on_mode_change(self, value):
         """Toggle between 2D, 3D, and Full Analysis panels."""
@@ -1216,12 +1233,19 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         return f"{angle}:{modes}"
 
     def _decode_config(self, code):
-        """Apply a compact config string to the UI widgets."""
+        """Apply a compact config string to the UI widgets.
+
+        Tolerates short codes from pre-Beta configs — coeffs past the code's
+        length keep their current (default) mode.
+        """
         self._history_navigating = True
         self.angle_var.set('Alpha' if code[0] == 'A' else 'Beta')
         for i, label in enumerate(_COEFF_ORDER):
+            idx = i + 2
+            if idx >= len(code):
+                break
             if label in self.coeff_mode_vars:
-                self.coeff_mode_vars[label].set(_MODE_DECODE[code[i + 2]])
+                self.coeff_mode_vars[label].set(_MODE_DECODE[code[idx]])
         self._history_navigating = False
         self._update_history_buttons()
 
@@ -1562,26 +1586,23 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
             a = stats.get('alpha_stats')
             if a:
                 parts.append(f"{len(a['var_values'])}Alpha")
-            b = stats.get('beta_stats')
-            if b:
-                parts.append(f"{len(b['var_values'])}Beta")
             td = stats.get('td_stats')
             if td:
                 parts.append(f"{len(td['machs'])}Mach")
-                for surface_name in SURFACE_SUFFIX:
-                    vals = td['surface_values'].get(surface_name, [])
+                for dim in DIMS_3D:
+                    vals = td['surface_values'].get(dim, [])
                     if vals:
-                        parts.append(f"{len(vals)}{surface_name}")
+                        parts.append(f"{len(vals)}{dim}")
             return "_".join(parts) + ".mat"
         elif mode == "3D Tables":
             angle = stats['angle_var']
             n_angle = len(stats.get('angle_values', []))
             n_mach = len(stats['machs'])
             parts = [f"avl_3d_{n_angle}{angle}_{n_mach}Mach"]
-            for surface_name in SURFACE_SUFFIX:
-                vals = stats['surface_values'].get(surface_name, [])
+            for dim in DIMS_3D:
+                vals = stats['surface_values'].get(dim, [])
                 if vals:
-                    parts.append(f"{len(vals)}{surface_name}")
+                    parts.append(f"{len(vals)}{dim}")
             return "_".join(parts) + ".mat"
         else:
             sv = stats['second_var']
@@ -1635,11 +1656,19 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
                 continue  # skip — will be caught during actual processing
 
             if check_angle:
-                alpha = run_vars.get('Alpha')
+                # New invariant: Beta is a virtual 3D dim, mutually exclusive
+                # with any physical surface deflection. Alpha + Beta together
+                # is valid (beta-as-dim with nonzero alpha axis).
                 beta = run_vars.get('Beta')
-                if alpha is not None and alpha != 0 and beta is not None and beta != 0:
-                    angle_violations.append(
-                        (filename, f"Alpha={alpha}, Beta={beta}"))
+                if beta is not None and beta != 0:
+                    nonzero_surf = [f"{s}={run_vars[s]}"
+                                    for s in ('FLAP', 'AIL', 'ELEV', 'RUDD')
+                                    if run_vars.get(s) is not None
+                                    and run_vars[s] != 0]
+                    if nonzero_surf:
+                        angle_violations.append(
+                            (filename,
+                             f"Beta={beta}, " + ", ".join(nonzero_surf)))
 
             if check_defl:
                 nonzero = []
@@ -1700,7 +1729,7 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         textbox.pack(fill="both", expand=True, padx=4, pady=4)
 
         if angle_violations:
-            textbox.insert("end", "BOTH ANGLES NON-ZERO\n")
+            textbox.insert("end", "BETA + SURFACE MIXED\n")
             textbox.insert("end", "-" * 44 + "\n")
             for name, detail in angle_violations:
                 textbox.insert("end", f"  {name}\n")
@@ -1718,11 +1747,26 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
         textbox.configure(state="disabled")
 
+        def _dismiss():
+            """Release the modal grab before destroying so the main window
+            receives focus cleanly — otherwise macOS can end up in a state
+            where the dialog reappears every time focus changes."""
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
         # --- Dismiss button ---
         ctk.CTkButton(dlg, text="OK", width=120, height=36,
                        fg_color=("#d32f2f", "#b71c1c"),
                        hover_color=("#b71c1c", "#8e0000"),
-                       command=dlg.destroy).pack(pady=(0, 14))
+                       command=_dismiss).pack(pady=(0, 14))
+
+        # Close via title-bar X, Escape, or Return/Enter.
+        dlg.protocol("WM_DELETE_WINDOW", _dismiss)
+        dlg.bind("<Escape>", lambda _e: _dismiss())
+        dlg.bind("<Return>", lambda _e: _dismiss())
 
         dlg.after(200, dlg.grab_set)
 
@@ -1733,15 +1777,14 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
         mode = self.mode_var.get()
 
-        # Pre-export validation (3D Tables and Full Analysis)
-        if mode in ("3D Tables", "Full Analysis") and (self.check_single_angle.get() or self.check_single_defl.get()):
-            ok, angle_viol, defl_viol = self._validate_files_pre_export()
-            if not ok:
-                self._show_validation_warning(angle_viol, defl_viol)
-                return
-
         # Snapshot all UI values before spawning the worker thread
         filepaths = list(self.filepaths)
+        needs_validation = (
+            mode in ("3D Tables", "Full Analysis")
+            and (self.check_single_angle.get() or self.check_single_defl.get())
+        )
+        check_angle = self.check_single_angle.get()
+        check_defl = self.check_single_defl.get()
         if mode in ("3D Tables", "Full Analysis"):
             angle = self.angle_var.get()
             coeff_modes = {}
@@ -1754,8 +1797,11 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
             angle = None
             coeff_modes = None
 
-        self._set_status("Processing...")
-        self._show_progress(determinate=(mode == "Full Analysis"))
+        self._set_status("Validating..." if needs_validation else "Processing...")
+        # Indeterminate spinner keeps moving during both validation and
+        # processing — gives constant feedback so the user never sees a
+        # static UI and thinks the app hung.
+        self._show_progress(determinate=False)
         if self.export_btn.winfo_exists():
             self.export_btn.configure(state="disabled")
         if self._gen_btn_action.winfo_exists():
@@ -1763,8 +1809,17 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         self._last_progress_time = 0.0
 
         def _worker():
-            """Run heavy processing off the main thread."""
+            """Run validation and heavy processing off the main thread."""
             try:
+                if needs_validation:
+                    ok, angle_viol, defl_viol = self._run_validation(
+                        filepaths, check_angle, check_defl)
+                    if not ok:
+                        self.after(0, lambda a=angle_viol, d=defl_viol:
+                                   self._validation_failed(a, d))
+                        return
+                    self.after(0, lambda: self._set_status("Processing..."))
+
                 if mode == "Full Analysis":
                     mat_data, stats = process_files_full(
                         filepaths, angle_var=angle, coeff_modes=coeff_modes,
@@ -1791,6 +1846,53 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _validation_failed(self, angle_violations, defl_violations):
+        """Back on main thread: drop the spinner, re-enable buttons, show warning."""
+        self._hide_progress()
+        if self.export_btn.winfo_exists():
+            self.export_btn.configure(state="normal")
+        if self._gen_btn_action.winfo_exists():
+            self._gen_btn_action.configure(state="normal")
+        self._set_status("Export blocked by validation")
+        self._show_validation_warning(angle_violations, defl_violations)
+
+    @staticmethod
+    def _run_validation(filepaths, check_angle, check_defl):
+        """Worker-thread validator — same rules as _validate_files_pre_export
+        but operates on a snapshot so it's safe off the main thread.
+
+        Uses parse_run_vars (header-only, ~100× faster than parse_file)
+        since validation only needs the run variables, not coefficients.
+        """
+        angle_violations = []
+        defl_violations = []
+        for filepath in filepaths:
+            filename = os.path.basename(filepath)
+            _mach, run_vars = parse_run_vars(filepath)
+            if run_vars is None:
+                continue
+            if check_angle:
+                beta = run_vars.get('Beta')
+                if beta is not None and beta != 0:
+                    nonzero_surf = [f"{s}={run_vars[s]}"
+                                    for s in ('FLAP', 'AIL', 'ELEV', 'RUDD')
+                                    if run_vars.get(s) is not None
+                                    and run_vars[s] != 0]
+                    if nonzero_surf:
+                        angle_violations.append(
+                            (filename,
+                             f"Beta={beta}, " + ", ".join(nonzero_surf)))
+            if check_defl:
+                nonzero = []
+                for surface in ('FLAP', 'AIL', 'ELEV', 'RUDD'):
+                    val = run_vars.get(surface)
+                    if val is not None and val != 0:
+                        nonzero.append(f"{surface}={val}")
+                if len(nonzero) > 1:
+                    defl_violations.append((filename, ", ".join(nonzero)))
+        ok = not angle_violations and not defl_violations
+        return ok, angle_violations, defl_violations
+
     def _export_error(self, title, status_msg, detail):
         """Handle export errors back on the main thread."""
         self._hide_progress()
@@ -1815,15 +1917,27 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
 
         default_name = self._build_filename(stats, mode)
 
-        save_path = filedialog.asksaveasfilename(
-            title="Save .mat file",
-            defaultextension=".mat",
-            filetypes=[("MATLAB file", "*.mat")],
-            initialfile=default_name,
-        )
+        kwargs = {
+            "title": "Save .mat file",
+            "defaultextension": ".mat",
+            "filetypes": [("MATLAB file", "*.mat")],
+            "initialfile": default_name,
+        }
+        # First export of the session: point NSSavePanel at the user's home
+        # folder so it doesn't sit for 30–60 s probing whatever stale path
+        # macOS last remembered (iCloud / network mounts / etc.). Subsequent
+        # exports reopen wherever the user last saved.
+        if self._last_save_dir and os.path.isdir(self._last_save_dir):
+            kwargs["initialdir"] = self._last_save_dir
+        else:
+            kwargs["initialdir"] = os.path.expanduser("~")
+
+        save_path = filedialog.asksaveasfilename(**kwargs)
         if not save_path:
             self._set_status("Export cancelled")
             return
+
+        self._last_save_dir = os.path.dirname(save_path)
 
         try:
             savemat(save_path, mat_data)
@@ -1836,10 +1950,9 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
         if mode == "Full Analysis":
             msg = self._build_full_report(stats, save_path)
             na = stats['n_alpha_labels']
-            nb = stats['n_beta_labels']
             nt = stats['n_td_labels']
             self._set_status(
-                f"Full Analysis: {na} Alpha + {nb} Beta + {nt} CS coefficients"
+                f"Full Analysis: {na} Alpha 2D + {nt} 3D coefficients"
             )
         elif mode == "3D Tables":
             msg = self._build_3d_report(stats, save_path)
@@ -1862,7 +1975,7 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
     def _has_issues(self, stats, mode):
         """Check if any section has skipped/duplicate/warning issues."""
         if mode == "Full Analysis":
-            for key in ('alpha_stats', 'beta_stats', 'td_stats'):
+            for key in ('alpha_stats', 'td_stats'):
                 s = stats.get(key)
                 if s and (s.get('skipped') or s.get('duplicates') or s.get('warnings')):
                     return True
@@ -1914,11 +2027,11 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
             "",
         ]
 
-        # Per-surface summary
-        for surface_name in SURFACE_SUFFIX:
-            vals = stats['surface_values'].get(surface_name, [])
+        # Per-dim summary (surfaces + Beta)
+        for dim in DIMS_3D:
+            vals = stats['surface_values'].get(dim, [])
             if vals:
-                lines.append(f"{surface_name}: {len(vals)} values {vals}")
+                lines.append(f"{dim}: {len(vals)} values {vals}")
 
         lines.append("")
         lines.append(f"{stats['n_3d']} coefficients as 3D "
@@ -1973,43 +2086,20 @@ class AVLParserApp(ctk.CTk, _DnDMixin):
             lines.append("No valid Alpha data found")
             lines.append("")
 
-        # Beta 2D section
-        b = stats.get('beta_stats')
-        if b:
-            n_b = len(b['var_values'])
-            n_m = len(b['machs'])
-            lines.append(f"--- Beta x Mach (2D) ---")
-            lines.append(f"Parsed {b['parsed']} files")
-            lines.append(f"{n_b} Beta values, {n_m} Mach values")
-            lines.append(f"{stats['n_beta_labels']} coefficients (Beta_ prefix)")
-            if b['skipped']:
-                lines.append(f"Skipped {len(b['skipped'])} files:")
-                for name, reason in b['skipped']:
-                    lines.append(f"  {name}: {reason}")
-            if b['duplicates']:
-                lines.append(f"Duplicates ({len(b['duplicates'])}):")
-                for name, mach, var_val, replaced in b['duplicates']:
-                    lines.append(f"  {name}: Mach={mach}, Beta={var_val} (overwrote {replaced})")
-            lines.append("")
-        else:
-            lines.append("--- Beta x Mach (2D) ---")
-            lines.append("No valid Beta data found")
-            lines.append("")
-
-        # 3D section
+        # 3D section (surfaces + Beta-as-dim)
         td = stats.get('td_stats')
         if td:
             angle = td['angle_var']
             n_angle = len(td.get('angle_values', []))
             n_m = len(td['machs'])
-            lines.append(f"--- Control Surfaces (3D) ---")
+            lines.append(f"--- Control Surfaces + Beta (3D) ---")
             lines.append(f"Angle axis: {angle}")
             lines.append(f"Parsed {td['parsed']} files")
             lines.append(f"{n_m} Mach values, {n_angle} {angle} values")
-            for surface_name in SURFACE_SUFFIX:
-                vals = td['surface_values'].get(surface_name, [])
+            for dim in DIMS_3D:
+                vals = td['surface_values'].get(dim, [])
                 if vals:
-                    lines.append(f"{surface_name}: {len(vals)} values {vals}")
+                    lines.append(f"{dim}: {len(vals)} values {vals}")
             lines.append(f"{td['n_3d']} 3D + {td['n_2d_angle']} 2D-angle"
                          f" + {td['n_2d_surface']} 2D-surface coefficients")
             if td['skipped']:

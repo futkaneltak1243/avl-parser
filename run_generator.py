@@ -60,6 +60,11 @@ CONSTRAINT_NAMES = ["alpha", "beta", "pb/2V", "qc/2V", "rb/2V",
 ANGLE_ABBREVS = {"Alpha": "A", "Beta": "B"}
 SURFACE_NAMES = ["FLAP", "AIL", "ELEV", "RUDD"]
 
+# Selectable sweep dims for 3D generation: physical surfaces plus Beta.
+# Beta sweeps produce files like M{m}A{alpha}B{beta} with all surfaces = 0.
+BETA_DIM = "Beta"
+DIM_CHOICES = SURFACE_NAMES + [BETA_DIM]
+
 # AVL 3.52 supports at most 25 run cases per .run file (NRMAX=25).
 # Exceeding this causes cases beyond 25 to be silently ignored.
 MAX_CASES_PER_RUN = 25
@@ -84,14 +89,18 @@ def _clean_number_str(value):
 
 
 def build_run_case_name(mach, angle_type, angle_val, surface_type, surface_val):
-    """Build case name like 'M0.02A-4' or 'M0.1A2FLAP5'.
+    """Build case name like 'M0.02A-4', 'M0.1A2FLAP5', or 'M0.9A-10B5' (Beta dim).
 
-    Surface name is only included when surface_val != 0.
+    Surface/Beta suffix is only included when surface_val != 0.
+    Beta dim is emitted as a 'B{val}' token, not 'Beta{val}'.
     """
     angle_abbrev = ANGLE_ABBREVS[angle_type]
     name = f"M{_clean_number_str(mach)}{angle_abbrev}{_clean_number_str(angle_val)}"
     if surface_val != 0.0:
-        name += f"{surface_type}{_clean_number_str(surface_val)}"
+        if surface_type == BETA_DIM:
+            name += f"B{_clean_number_str(surface_val)}"
+        else:
+            name += f"{surface_type}{_clean_number_str(surface_val)}"
     return name
 
 
@@ -186,6 +195,13 @@ def build_combined_cases_file(fixed_params, value_sets):
     case_names = []
 
     for vs in value_sets:
+        # Beta-as-dim requires angle_type=Alpha (mixing Beta axis + Beta dim is
+        # meaningless). Reject at the value-set level before emitting any case.
+        if vs["surface_type"] == BETA_DIM and vs["angle_type"] == BETA_DIM:
+            raise ValueError(
+                "Invalid value set: cannot sweep Beta as both angle and dim."
+            )
+
         for mach in vs["mach_values"]:
             for angle_val in vs["angle_values"]:
                 for surface_val in vs["surface_values"]:
@@ -194,8 +210,13 @@ def build_combined_cases_file(fixed_params, value_sets):
                     else:
                         alpha, beta = 0.0, angle_val
 
-                    surfaces = {s: 0.0 for s in SURFACE_NAMES}
-                    surfaces[vs["surface_type"]] = surface_val
+                    if vs["surface_type"] == BETA_DIM:
+                        # Beta dim: overrides beta, all physical surfaces stay zero.
+                        beta = surface_val
+                        surfaces = {s: 0.0 for s in SURFACE_NAMES}
+                    else:
+                        surfaces = {s: 0.0 for s in SURFACE_NAMES}
+                        surfaces[vs["surface_type"]] = surface_val
 
                     case_name = build_run_case_name(
                         mach, vs["angle_type"], angle_val,
