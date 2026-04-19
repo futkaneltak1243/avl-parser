@@ -39,6 +39,25 @@ jobs:
           name: AVLParser-Windows-x64
           path: dist/AVLParser-Windows-x64.zip
 
+      # ------------------------------------------------------------
+      # Companion app: AVL Mat Validator.  Built independently from
+      # the main AVL Parser above — does not modify its output.
+      # ------------------------------------------------------------
+      - name: Build Validator EXE
+        run: pyinstaller --noconfirm --windowed --onefile --name "AVLMatValidator" --icon "validator_icon.ico" --add-data "parse_avl.py;." --add-data "view_mat.py;." --add-data "validator_icon.png;." --hidden-import customtkinter validate_mat.py
+
+      - name: Package Validator EXE
+        run: |
+          New-Item -ItemType Directory -Path "dist\AVLMatValidator" -Force
+          Copy-Item "dist\AVLMatValidator.exe" "dist\AVLMatValidator\"
+          Compress-Archive -Path "dist\AVLMatValidator\*" -DestinationPath "dist\AVLMatValidator-Windows-x64.zip"
+
+      - name: Upload Validator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AVLMatValidator-Windows-x64
+          path: dist/AVLMatValidator-Windows-x64.zip
+
       - name: Get short SHA
         id: sha
         run: echo "short=$(git rev-parse --short HEAD)" >> $env:GITHUB_OUTPUT
@@ -74,5 +93,6 @@ jobs:
             **AVLParser-Windows-x64.zip** — Contains the app, `avl352.exe`, and sample test files.
           files: |
             dist/AVLParser-Windows-x64.zip
+            dist/AVLMatValidator-Windows-x64.zip
           make_latest: true
           prerelease: false
